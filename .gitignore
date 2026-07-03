@@ -1,0 +1,16 @@
+# archivos temporales / scratch (previews, recortes, descargas de fuentes)
+_*.png
+_*.html
+_*.woff2
+_prev.js
+_buildfonts.js
+_makepreview.js
+_scantest.js
+
+# extension empaquetada (usar Releases de GitHub, no versionar el binario)
+*.vsix
+
+# sistema
+Thumbs.db
+.DS_Store
+node_modules/

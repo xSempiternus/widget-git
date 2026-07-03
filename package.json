@@ -1,0 +1,78 @@
+{
+  "name": "git-arcade",
+  "displayName": "GIT ARCADE",
+  "description": "Widget arcade para hacer check/pull de main en cualquier repo o proyecto (auto-detectado).",
+  "version": "1.7.0",
+  "publisher": "nikolas",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "SCM Providers",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "gitArcadeContainer",
+          "title": "Git Arcade",
+          "icon": "media/arcade.svg"
+        }
+      ]
+    },
+    "views": {
+      "gitArcadeContainer": [
+        {
+          "id": "gitArcadeView",
+          "type": "webview",
+          "name": "Git Arcade"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "gitArcade.open",
+        "title": "GIT ARCADE: Abrir widget"
+      },
+      {
+        "command": "gitArcade.rescan",
+        "title": "GIT ARCADE: Re-escanear proyectos"
+      },
+      {
+        "command": "gitArcade.popout",
+        "title": "GIT ARCADE: Abrir en ventana flotante"
+      }
+    ],
+    "configuration": {
+      "title": "GIT ARCADE",
+      "properties": {
+        "gitArcade.rootPath": {
+          "type": "string",
+          "default": "C:\\Users\\nikoa\\Documents\\PROJECTS",
+          "description": "Carpeta raiz principal donde escanear proyectos y repositorios git."
+        },
+        "gitArcade.extraPaths": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [ "C:\\Users\\nikoa\\Documents" ],
+          "description": "Carpetas adicionales a escanear (ademas de rootPath). Ej: donde clonas repos sueltos."
+        },
+        "gitArcade.scanDepth": {
+          "type": "number",
+          "default": 4,
+          "description": "Profundidad maxima de carpetas a escanear buscando repos .git."
+        },
+        "gitArcade.mainBranch": {
+          "type": "string",
+          "default": "",
+          "description": "Rama a integrar. Vacio = detectar automaticamente (origin/HEAD, si no main)."
+        }
+      }
+    }
+  }
+}
