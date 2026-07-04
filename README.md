@@ -12,6 +12,12 @@ Widget arcade para VSCode: **CHECK main** (fetch + avisa) y **PULL main** (integ
 
 Es una **alternativa simplificada al Source Control** de VSCode: sin stagear archivo por archivo ni diffs, enfocada en lo esencial y multi-repo.
 
+## Sincronización con VSCode (v2.2)
+- **Extensión → VSCode/terminal**: al cambiar de rama, hace `git checkout` real (la terminal ya queda alineada) y fuerza `git.refresh` para que el indicador de rama nativo se actualice al instante.
+- **Elegir un proyecto en el dropdown** abre su carpeta como workspace en VSCode (`vscode.openFolder`); si ya está abierta, solo refresca.
+- **VSCode/terminal → Extensión**: un `fs.watch` sobre `.git/HEAD` de cada repo del proyecto detecta cambios de rama hechos por fuera y refresca el estado solo.
+- **Auto-seleccionar**: al enfocar una carpeta/archivo en VSCode, la extensión selecciona automáticamente el proyecto correspondiente.
+
 ## Uso
 1. Recarga VSCode (`Ctrl+Shift+P` → *Developer: Reload Window*).
 2. Clic en **🕹 GIT ARCADE** (abajo-izquierda) o en el icono del joystick de la barra de actividades. También `Ctrl+Shift+P` → *GIT ARCADE: Abrir widget*.

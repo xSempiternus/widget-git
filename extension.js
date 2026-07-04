@@ -6,6 +6,10 @@ const path = require('path');
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
 let statusItem = null;
 let cachedProjects = null;
+let currentProject = null;   // proyecto seleccionado ahora mismo (para el auto-refresco)
+let headWatchers = [];       // fs.watch sobre cada .git para detectar cambios de rama externos
+let headDebounce = null;
+let suppressWatchUntil = 0;  // ignora eventos de watch provocados por nuestras propias operaciones
 
 // ---------------------------------------------------------------------------
 //  Activacion
@@ -26,7 +30,7 @@ function activate(context) {
       wv.onDidReceiveMessage(onMessage);
       targets.add(wv);
       webviewView.onDidDispose(() => targets.delete(wv));
-      webviewView.onDidChangeVisibility(() => { if (webviewView.visible) sendProjects(); });
+      webviewView.onDidChangeVisibility(() => { if (webviewView.visible) { sendProjects(); autoSelect(); } });
     }
   };
   context.subscriptions.push(
@@ -42,6 +46,14 @@ function activate(context) {
       cachedProjects = null; sendProjects();
       vscode.window.showInformationMessage('GIT ARCADE: proyectos re-escaneados.');
     })
+  );
+
+  // --- Sincronizacion con VSCode ---
+  // al cambiar el editor o las carpetas del workspace, auto-selecciona el proyecto que toca
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor(() => autoSelect()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { cachedProjects = null; autoSelect(); }),
+    { dispose: disposeHeadWatchers }
   );
 }
 
@@ -68,10 +80,12 @@ async function onMessage(msg) {
   try {
     // al iniciar una operacion que modifica algo, limpia la bandera de cancelacion
     if (['check', 'pull', 'commit', 'push', 'switch', 'newbranch', 'suggest'].includes(msg.cmd)) opCancelled = false;
+    if (msg.cmd === 'switch' || msg.cmd === 'newbranch') suppressWatchUntil = Date.now() + 2500;
     switch (msg.cmd) {
-      case 'ready': sendProjects(); break;
-      case 'rescan': cachedProjects = null; sendProjects(); break;
+      case 'ready': sendProjects(); autoSelect(); break;
+      case 'rescan': cachedProjects = null; sendProjects(); autoSelect(); break;
       case 'status': await sendStatus(msg.project); break;
+      case 'select': await selectProject(msg.project); break;
       case 'check': await runMain('check', msg.project); break;
       case 'pull': await runMain('pull', msg.project); break;
       case 'commit': await commitAction(msg.project, msg.message); break;
@@ -185,6 +199,82 @@ async function defaultBranch(cwd) {
 function findProject(name) { return getProjects().find(p => p.name === name); }
 
 // ---------------------------------------------------------------------------
+//  Sincronizacion con VSCode (extension <-> editor / terminal)
+// ---------------------------------------------------------------------------
+// Fuerza el refresco de la vista de git nativa (indicador de rama, SCM).
+function refreshVscodeGit() {
+  try { vscode.commands.executeCommand('git.refresh'); } catch (e) {}
+}
+
+// Nombre del proyecto que corresponde a la carpeta/archivo activo en VSCode.
+function activeProjectName() {
+  const projects = getProjects();
+  const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
+  const active = vscode.window.activeTextEditor;
+  const activePath = active && active.document.uri.scheme === 'file' ? active.document.uri.fsPath.toLowerCase() : '';
+  const folders = (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath.toLowerCase());
+  // 1) por el archivo activo
+  if (activePath) {
+    for (const p of projects) {
+      if (inside(activePath, p.dir.toLowerCase())) return p.name;
+      for (const r of p.repos) if (inside(activePath, r.path.toLowerCase())) return p.name;
+    }
+  }
+  // 2) por la(s) carpeta(s) del workspace
+  for (const p of projects) {
+    const dl = p.dir.toLowerCase();
+    for (const f of folders) if (inside(f, dl) || inside(dl, f)) return p.name;
+    for (const r of p.repos) { const rl = r.path.toLowerCase(); for (const f of folders) if (inside(f, rl) || inside(rl, f)) return p.name; }
+  }
+  return null;
+}
+
+// Le dice al webview que seleccione el proyecto activo (NO abre carpeta: evita bucles).
+function autoSelect() {
+  const name = activeProjectName();
+  if (name) post({ type: 'select', project: name });
+}
+
+// El usuario eligio un proyecto en el dropdown: abre su carpeta como workspace en VSCode.
+// Si ya esta abierta, solo refresca el estado (no recarga la ventana).
+async function selectProject(name) {
+  const proj = findProject(name);
+  if (!proj) { await sendStatus(name); return; }
+  const tl = proj.dir.toLowerCase();
+  const folders = (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath.toLowerCase());
+  const already = folders.some(f => f === tl || f.startsWith(tl + path.sep) || tl.startsWith(f + path.sep));
+  if (already) { await sendStatus(name); return; }
+  post({ type: 'log', level: 'dim', text: `Abriendo ${proj.name} en VSCode...` });
+  suppressWatchUntil = Date.now() + 2500;
+  await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(proj.dir), { forceNewWindow: false });
+}
+
+// Observa .git/HEAD de cada repo del proyecto: si cambias de rama desde VSCode o la
+// terminal, la extension refresca su estado automaticamente.
+function armHeadWatchers(proj) {
+  disposeHeadWatchers();
+  if (!proj) return;
+  for (const repo of proj.repos) {
+    const gitDir = path.join(repo.path, '.git');
+    try {
+      const w = fs.watch(gitDir, { persistent: false }, (event, filename) => {
+        const fn = filename ? filename.toString() : '';
+        if (fn !== 'HEAD' && fn !== 'ORIG_HEAD') return;
+        if (Date.now() < suppressWatchUntil) return;   // ignora nuestros propios checkouts
+        if (headDebounce) clearTimeout(headDebounce);
+        headDebounce = setTimeout(() => { if (currentProject) { refreshVscodeGit(); sendStatus(currentProject); } }, 300);
+      });
+      headWatchers.push(w);
+    } catch (e) { /* .git puede ser archivo (worktree) o no existir: se ignora */ }
+  }
+}
+
+function disposeHeadWatchers() {
+  for (const w of headWatchers) { try { w.close(); } catch (e) {} }
+  headWatchers = [];
+}
+
+// ---------------------------------------------------------------------------
 //  STATUS: rama actual + ahead/behind + cambios por repo
 // ---------------------------------------------------------------------------
 // Lee TODO el estado de un repo en 2 llamadas git (en vez de ~6):
@@ -243,6 +333,7 @@ async function readRepo(repo) {
 async function sendStatus(projectName) {
   const proj = findProject(projectName);
   if (!proj) return;
+  if (currentProject !== projectName) { currentProject = projectName; armHeadWatchers(proj); }
   const results = await Promise.all(proj.repos.map(readRepo));
   const repos = results.map(r => ({ name: r.name, branch: r.branch, ahead: r.ahead, behind: r.behind, dirty: r.dirty, hasUp: r.hasUp, hasRemote: r.hasRemote, files: r.files }));
   // union de ramas conservando el orden por actividad reciente
@@ -601,6 +692,7 @@ async function switchBranch(projectName, branch) {
     post({ type: 'log', level: 'ok', text: `${repo.name}: ahora en ${branch}` });
   }
   post({ type: 'log', level: 'hdr', text: '>> Listo' });
+  refreshVscodeGit();
   post({ type: 'done' });
   await sendStatus(projectName);
 }
@@ -626,6 +718,7 @@ async function newBranch(projectName) {
     post({ type: 'log', level: 'ok', text: `${repo.name}: creada y activa ${branch}` });
   }
   post({ type: 'log', level: 'hdr', text: '>> Rama creada. Recuerda Push para subirla.' });
+  refreshVscodeGit();
   post({ type: 'done' });
   await sendStatus(projectName);
 }
@@ -933,7 +1026,7 @@ function getHtml() {
     });
   }
 
-  sel.addEventListener('change', requestStatus);
+  sel.addEventListener('change', ()=>{ if(!sel.value) return; requestStatus(); vscode.postMessage({cmd:'select', project:sel.value}); });
   $('branchsel').addEventListener('change', ()=>{ const b=$('branchsel').value; if(!sel.value||!b)return; clearScreen(); vscode.postMessage({cmd:'switch', project:sel.value, branch:b}); });
   $('newbranch').addEventListener('click', ()=>{ if(!sel.value)return; vscode.postMessage({cmd:'newbranch', project:sel.value}); });
   $('check').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'check', project:sel.value}); });
@@ -957,6 +1050,7 @@ function getHtml() {
       projects.forEach(p=>{ const o=document.createElement('option'); o.value=p.name; o.textContent=p.name+' ('+p.repos.length+')'; sel.appendChild(o); });
       if(prev && projects.some(p=>p.name===prev)) sel.value=prev;
       requestStatus();
+    } else if(m.type==='select'){ if(m.project && projects.some(p=>p.name===m.project) && sel.value!==m.project){ sel.value=m.project; requestStatus(); }
     } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint);
     } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
     } else if(m.type==='busy'){ setBusy(true);
