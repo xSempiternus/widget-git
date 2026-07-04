@@ -73,6 +73,7 @@ async function onMessage(msg) {
       case 'check': await runMain('check', msg.project); break;
       case 'pull': await runMain('pull', msg.project); break;
       case 'commit': await commitAction(msg.project, msg.message); break;
+      case 'suggest': await suggestMessage(msg.project); break;
       case 'push': await pushAction(msg.project); break;
       case 'switch': await switchBranch(msg.project, msg.branch); break;
       case 'newbranch': await newBranch(msg.project); break;
@@ -172,34 +173,73 @@ function findProject(name) { return getProjects().find(p => p.name === name); }
 // ---------------------------------------------------------------------------
 //  STATUS: rama actual + ahead/behind + cambios por repo
 // ---------------------------------------------------------------------------
+// Lee TODO el estado de un repo en 2 llamadas git (en vez de ~6):
+//  - `git status --porcelain=v1 --branch`: rama, upstream, ahead/behind y archivos.
+//  - `git for-each-ref refs/heads`: ramas locales ordenadas por actividad reciente.
+async function readRepo(repo) {
+  const st = await git(repo.path, ['status', '--porcelain', '--branch']);
+  const lines = (st.out || '').split('\n');
+  let branch = '?', hasUp = false, ahead = 0, behind = 0;
+  const header = lines[0] || '';
+  const hm = header.match(/^## (.+)$/);
+  if (hm) {
+    let h = hm[1];
+    if (/^HEAD \(no branch\)/.test(h) || /^\(detached/.test(h)) {
+      branch = '(detached)';
+    } else {
+      const ab = h.match(/\[(.+)\]\s*$/);
+      if (ab) {
+        const a = ab[1].match(/ahead (\d+)/); const b = ab[1].match(/behind (\d+)/);
+        ahead = a ? parseInt(a[1], 10) : 0;
+        behind = b ? parseInt(b[1], 10) : 0;
+        h = h.replace(/\s*\[.+\]\s*$/, '');
+      }
+      const parts = h.split('...');
+      branch = parts[0].trim();
+      hasUp = parts.length > 1;
+    }
+  }
+  const fileLines = lines.slice(1).filter(Boolean);
+  const files = fileLines.slice(0, 60).map(l => ({ code: l.slice(0, 2), path: l.slice(3) }));
+
+  const br = await git(repo.path, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads']);
+  const branches = br.out.split('\n').map(b => b.trim()).filter(Boolean);
+
+  const rem = await git(repo.path, ['remote', 'get-url', 'origin']);
+  const hasRemote = rem.code === 0 && !!rem.out;
+
+  return { name: repo.name, branch, ahead, behind, dirty: fileLines.length, hasUp, hasRemote, remoteUrl: rem.out || '', files, branches };
+}
+
 async function sendStatus(projectName) {
   const proj = findProject(projectName);
   if (!proj) return;
-  const repos = [];
-  const branchSet = new Set();
-  const currents = new Set();
-  for (const repo of proj.repos) {
-    const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
-    currents.add(branch);
-    const up = await git(repo.path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
-    let ahead = 0, behind = 0; const hasUp = up.code === 0;
-    if (hasUp) {
-      const c = await git(repo.path, ['rev-list', '--left-right', '--count', '@{u}...HEAD']);
-      const m = (c.out || '').split(/\s+/);
-      behind = parseInt(m[0] || '0', 10) || 0;
-      ahead = parseInt(m[1] || '0', 10) || 0;
-    }
-    const st = await git(repo.path, ['status', '--porcelain']);
-    const lines = st.out ? st.out.split('\n').filter(Boolean) : [];
-    const files = lines.slice(0, 50).map(l => ({ code: l.slice(0, 2), path: l.slice(3) }));
-    // ramas locales
-    const br = await git(repo.path, ['branch', '--format=%(refname:short)']);
-    br.out.split('\n').map(b => b.trim()).filter(Boolean).forEach(b => branchSet.add(b));
-    repos.push({ name: repo.name, branch, ahead, behind, dirty: lines.length, hasUp, files });
-  }
-  const branches = Array.from(branchSet).sort((a, b) => a.localeCompare(b));
+  const results = await Promise.all(proj.repos.map(readRepo));
+  const repos = results.map(r => ({ name: r.name, branch: r.branch, ahead: r.ahead, behind: r.behind, dirty: r.dirty, hasUp: r.hasUp, hasRemote: r.hasRemote, files: r.files }));
+  // union de ramas conservando el orden por actividad reciente
+  const seen = new Set(); const branches = [];
+  for (const r of results) for (const b of r.branches) { if (!seen.has(b)) { seen.add(b); branches.push(b); } }
+  const currents = new Set(results.map(r => r.branch));
   const current = currents.size === 1 ? Array.from(currents)[0] : '';
-  post({ type: 'status', project: projectName, repos, branches, current });
+  post({ type: 'status', project: projectName, repos, branches, current, hint: assistantHint(proj.name, results) });
+}
+
+// Mensaje proactivo de la mascota-asistente segun el estado agregado.
+function assistantHint(projName, results) {
+  const noRemote = results.filter(r => !r.hasRemote);
+  const dirty = results.reduce((s, r) => s + r.dirty, 0);
+  const ahead = results.reduce((s, r) => s + r.ahead, 0);
+  const behind = results.reduce((s, r) => s + r.behind, 0);
+  const noUp = results.filter(r => r.hasRemote && !r.hasUp);
+  if (noRemote.length) {
+    const n = noRemote.map(r => r.name).join(', ');
+    return `&#9888; ${n} no est&aacute; conectado a un remoto. Con&eacute;ctalo: <span class="mono">git remote add origin &lt;url&gt;</span> y luego Push.`;
+  }
+  if (dirty > 0) return `Tienes <b>${dirty} cambio(s) sin commitear</b> &#9749; &mdash; escribe un mensaje (o dale &#10024;) y Commit.`;
+  if (ahead > 0) return `Tienes <b>${ahead} commit(s) sin pushear</b> &#8593; &mdash; dale <b>Push</b> para subirlos.`;
+  if (noUp.length) return `Tu rama a&uacute;n no est&aacute; en el remoto &#8593; &mdash; dale <b>Push</b> y la creo en GitHub.`;
+  if (behind > 0) return `Hay <b>${behind} commit(s) nuevo(s)</b> en el remoto &#8595; &mdash; dale <b>Pull</b>.`;
+  return `Todo al d&iacute;a &#10024; &iquest;un cafecito? &#9749;`;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,24 +326,119 @@ async function pushAction(projectName) {
   post({ type: 'busy' });
   post({ type: 'log', level: 'hdr', text: `== PUSH :: ${proj.name} ==` });
 
+  let failed = 0;
   for (const repo of proj.repos) {
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
+
+    // 1) hay remoto 'origin'?
+    const rem = await git(repo.path, ['remote', 'get-url', 'origin']);
+    if (rem.code !== 0 || !rem.out) {
+      failed++;
+      post({ type: 'log', level: 'err', text: `${tag}: NO hay remoto 'origin' configurado.` });
+      post({ type: 'log', level: 'dim', text: `   Conectalo: git remote add origin https://github.com/usuario/repo.git` });
+      continue;
+    }
+
     const up = await git(repo.path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
     let p;
     if (up.code !== 0) {
-      post({ type: 'log', level: 'dim', text: `${tag}: sin upstream, creando origin/${branch}...` });
+      post({ type: 'log', level: 'dim', text: `${tag}: rama nueva, subiendo a origin/${branch}...` });
       p = await git(repo.path, ['push', '-u', 'origin', branch]);
     } else {
       post({ type: 'log', level: 'dim', text: `${tag}: push...` });
       p = await git(repo.path, ['push']);
     }
-    if (p.code !== 0) { post({ type: 'log', level: 'err', text: `${tag}: fallo push - ${(p.err || p.out).split('\n')[0]}` }); continue; }
+    if (p.code !== 0) {
+      failed++;
+      const err = (p.err || p.out || '').split('\n').filter(Boolean).slice(0, 3);
+      post({ type: 'log', level: 'err', text: `${tag}: fallo push` });
+      err.forEach(e => post({ type: 'log', level: 'dim', text: '   ' + e }));
+      // pistas comunes
+      const joined = (p.err || p.out || '').toLowerCase();
+      if (joined.includes('authentication') || joined.includes('403') || joined.includes('permission') || joined.includes('could not read')) {
+        post({ type: 'log', level: 'warn', text: '   -> parece problema de credenciales: prueba "gh auth login" o revisa el Git Credential Manager.' });
+      } else if (joined.includes('rejected') || joined.includes('non-fast-forward') || joined.includes('behind')) {
+        post({ type: 'log', level: 'warn', text: '   -> el remoto va adelante: haz Pull primero y reintenta Push.' });
+      }
+      continue;
+    }
     post({ type: 'log', level: 'ok', text: `${tag}: push OK` });
   }
-  post({ type: 'log', level: 'hdr', text: '>> Push terminado' });
+  post({ type: 'log', level: 'hdr', text: failed > 0 ? `>> Push con ${failed} error(es)` : '>> Push terminado' });
   post({ type: 'done' });
   await sendStatus(projectName);
+}
+
+// ---------------------------------------------------------------------------
+//  SUGERIR mensaje de commit a partir de los cambios (heuristico, local)
+// ---------------------------------------------------------------------------
+function baseName(p) { return p.split('/').pop().replace(/"/g, ''); }
+function topDir(p) { const parts = p.split('/'); return parts.length > 1 ? parts[0] : ''; }
+function briefList(names) {
+  const u = Array.from(new Set(names));
+  if (u.length === 1) return u[0];
+  if (u.length === 2) return `${u[0]} y ${u[1]}`;
+  return `${u[0]} y ${u.length - 1} archivos mas`;
+}
+
+async function suggestMessage(projectName) {
+  const proj = findProject(projectName);
+  if (!proj) { post({ type: 'done' }); return; }
+  post({ type: 'busy' });
+
+  // junta los cambios de todos los repos del proyecto
+  const added = [], modified = [], deleted = [], renamed = [];
+  for (const repo of proj.repos) {
+    const st = await git(repo.path, ['status', '--porcelain']);
+    for (const l of (st.out || '').split('\n').filter(Boolean)) {
+      const code = l.slice(0, 2), p = l.slice(3);
+      const c = code.replace(/\s/g, '');
+      if (code.includes('?')) added.push(p);
+      else if (c.includes('R')) renamed.push(p.split(' -> ').pop());
+      else if (c.includes('A')) added.push(p);
+      else if (c.includes('D')) deleted.push(p);
+      else if (c.includes('M') || c.includes('U') || c.includes('T')) modified.push(p);
+      else modified.push(p);
+    }
+  }
+  const total = added.length + modified.length + deleted.length + renamed.length;
+  if (total === 0) {
+    post({ type: 'log', level: 'warn', text: 'No hay cambios para sugerir un mensaje' });
+    post({ type: 'done' });
+    return;
+  }
+
+  const all = [...added, ...modified, ...deleted, ...renamed];
+  // scope = carpeta de primer nivel mas comun
+  const dirCount = {};
+  for (const p of all) { const d = topDir(p); if (d) dirCount[d] = (dirCount[d] || 0) + 1; }
+  const scope = Object.keys(dirCount).sort((a, b) => dirCount[b] - dirCount[a])[0] || '';
+
+  // tipo conventional-commit aproximado
+  const onlyDocs = all.length > 0 && all.every(p => /\.(md|mdx|txt|rst)$/i.test(p));
+  const onlyMeta = all.length > 0 && all.every(p => /(package\.json|package-lock|\.ya?ml|\.toml|\.gitignore|\.env|dockerfile)/i.test(p));
+  let type;
+  if (onlyDocs) type = 'docs';
+  else if (onlyMeta) type = 'chore';
+  else if (added.length && !modified.length && !deleted.length) type = 'feat';
+  else if (deleted.length && !added.length && !modified.length) type = 'chore';
+  else if (added.length) type = 'feat';
+  else type = 'refactor';
+
+  // descripcion
+  const parts = [];
+  if (added.length) parts.push(`agrega ${briefList(added.map(baseName))}`);
+  if (modified.length) parts.push(`actualiza ${briefList(modified.map(baseName))}`);
+  if (renamed.length) parts.push(`renombra ${briefList(renamed.map(baseName))}`);
+  if (deleted.length) parts.push(`elimina ${briefList(deleted.map(baseName))}`);
+  let desc = parts.join(', ');
+  let message = `${type}${scope ? `(${scope})` : ''}: ${desc}`;
+  if (message.length > 100) message = message.slice(0, 97).trimEnd() + '...';
+
+  post({ type: 'log', level: 'ok', text: `Sugerencia lista (${total} cambio(s))` });
+  post({ type: 'suggest', message });
+  post({ type: 'done' });
 }
 
 // ---------------------------------------------------------------------------
@@ -430,6 +565,17 @@ function getHtml() {
   .b-dirty{ color:#f0b88a; background:rgba(224,145,47,.14); border:1px solid rgba(224,145,47,.5);}
   .b-up{ color:#f0d8a0; background:rgba(224,145,47,.14); border:1px solid rgba(224,145,47,.4);}
   .b-dn{ color:#e6b48a; background:rgba(207,107,66,.16); border:1px solid rgba(207,107,66,.45);}
+  .b-noremote{ color:#f0a882; background:rgba(207,107,66,.18); border:1px solid rgba(207,107,66,.6);}
+
+  /* fila de commit con boton sugerir */
+  .commitrow { display:flex; gap:8px; }
+  .commitrow .input { flex:1; }
+  .sugg { width:40px; flex:none; border:1px solid var(--bd2); border-radius:10px; background:var(--surfA);
+    color:var(--amber); font-size:16px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .sugg:hover { box-shadow:0 0 10px -3px rgba(224,145,47,.7); border-color:rgba(224,145,47,.5); }
+  .sugg:disabled { opacity:.5; cursor:not-allowed; }
+  .input.flash { animation:flash .7s ease; }
+  @keyframes flash { 0%{box-shadow:0 0 0 2px rgba(224,145,47,.85);} 100%{box-shadow:0 0 0 1px rgba(224,145,47,0);} }
 
   /* lista de archivos cambiados (desplegable) */
   .files { display:none; padding:8px 11px; border-radius:8px; background:var(--surfC); border:1px solid var(--bd4);
@@ -479,8 +625,10 @@ function getHtml() {
   /* burbuja mascota + feedback */
   .bubble { display:flex; gap:10px; background:var(--surfC); border:1px solid var(--bd4); border-left:3px solid var(--amber);
     border-radius:12px; padding:11px 12px; }
-  .bot { width:44px; height:44px; flex:none; align-self:flex-start; animation:bob 3.4s ease-in-out infinite; }
+  .bot { width:44px; height:44px; flex:none; align-self:flex-start; animation:bob 3.4s ease-in-out infinite; transform-origin:60% 90%; }
   @keyframes bob { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-2px);} }
+  .bot.working { animation:work .5s ease-in-out infinite; filter:drop-shadow(0 0 6px rgba(224,145,47,.6)); }
+  @keyframes work { 0%{transform:translateY(0) rotate(-5deg);} 50%{transform:translateY(-3px) rotate(5deg);} 100%{transform:translateY(0) rotate(-5deg);} }
   .screen { flex:1; min-width:0; max-height:90px; overflow-y:auto; font-family:var(--sans); font-size:12.5px; line-height:1.45; color:var(--txt2); }
   .screen div { white-space:pre-wrap; word-break:break-word; }
   .screen .greet b, .info b { color:var(--amber); }
@@ -530,7 +678,10 @@ function getHtml() {
 
     <div class="field">
       <label class="lbl">Tu trabajo</label>
-      <input class="input" id="msg" placeholder="mensaje de commit&hellip;" maxlength="200">
+      <div class="commitrow">
+        <input class="input" id="msg" placeholder="mensaje de commit&hellip;" maxlength="200">
+        <button class="sugg" id="suggest" title="Sugerir mensaje segun los cambios">&#10024;</button>
+      </div>
     </div>
 
     <div class="cards">
@@ -539,7 +690,7 @@ function getHtml() {
     </div>
 
     <div class="bubble">
-      <div class="bot mimg-full"></div>
+      <div class="bot mimg-full" id="bot"></div>
       <div class="screen" id="screen"><div class="greet">Buenas &#9749; Elige un <b>proyecto</b> y te digo en qu&eacute; <b>rama</b> andas.</div></div>
     </div>
 
@@ -558,7 +709,9 @@ function getHtml() {
   function line(text, level){ const d=document.createElement('div'); d.className=level||'info'; d.textContent=text;
     screen.appendChild(d); screen.scrollTop=screen.scrollHeight; }
   function clearScreen(){ screen.innerHTML=''; }
-  function setBusy(b){ ['check','pull','commit','push'].forEach(id=>$(id).disabled=b); sel.disabled=b; }
+  function setHint(html){ screen.innerHTML='<div class="greet">'+html+'</div>'; }
+  function setBusy(b){ ['check','pull','commit','push','suggest'].forEach(id=>{ const el=$(id); if(el) el.disabled=b; }); sel.disabled=b;
+    const bot=$('bot'); if(bot) bot.classList.toggle('working',b); }
   function requestStatus(){ if(sel.value){ statusEl.innerHTML='<div class="srow"><span class="repo">cargando estado...</span></div>'; vscode.postMessage({cmd:'status', project:sel.value}); } }
 
   function fileClass(code){
@@ -578,9 +731,10 @@ function getHtml() {
     branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; if(b===current)o.selected=true; bsel.appendChild(o); });
   }
 
-  function renderStatus(p, repos, branches, current){
+  function renderStatus(p, repos, branches, current, hint){
     if(sel.value!==p) return;
     renderBranchBar(branches, current);
+    if(hint) setHint(hint);
     statusEl.innerHTML='';
     repos.forEach(r=>{
       const hasFiles = r.files && r.files.length;
@@ -592,6 +746,7 @@ function getHtml() {
       else badges+='<span class="badge b-clean">limpio</span>';
       if(r.ahead>0) badges+=' <span class="badge b-up">&#8593;'+r.ahead+'</span>';
       if(r.behind>0) badges+=' <span class="badge b-dn">&#8595;'+r.behind+'</span>';
+      if(r.hasRemote===false) badges+=' <span class="badge b-noremote">sin remoto</span>';
       row.innerHTML='<span class="br"><span class="ico">&#9095;</span>'+r.branch+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
       statusEl.appendChild(row);
       if(hasFiles){
@@ -615,6 +770,7 @@ function getHtml() {
   $('pull').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'pull', project:sel.value}); });
   $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; });
   $('push').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'push', project:sel.value}); });
+  $('suggest').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value}); });
   $('rescan').addEventListener('click', ()=>vscode.postMessage({cmd:'rescan'}));
   $('refresh').addEventListener('click', requestStatus);
   $('popout').addEventListener('click', ()=>vscode.postMessage({cmd:'popout'}));
@@ -629,7 +785,8 @@ function getHtml() {
       projects.forEach(p=>{ const o=document.createElement('option'); o.value=p.name; o.textContent=p.name+' ('+p.repos.length+')'; sel.appendChild(o); });
       if(prev && projects.some(p=>p.name===prev)) sel.value=prev;
       requestStatus();
-    } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current);
+    } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint);
+    } else if(m.type==='suggest'){ msg.value=m.message; msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
     } else if(m.type==='busy'){ setBusy(true);
     } else if(m.type==='done'){ setBusy(false);
     } else if(m.type==='log'){ line(m.text, m.level); }
