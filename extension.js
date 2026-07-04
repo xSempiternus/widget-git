@@ -503,9 +503,9 @@ function getHtml() {
 <style>
   ${fontCss}
   :root {
-    --bg1:#1d130d; --bg2:#100b08;
-    --surfA:#241811; --surfB:#201510; --surfC:#19110b;
-    --bd1:#3a281b; --bd2:#43301f; --bd3:#38271a; --bd4:#33241a;
+    --bg1:#2f2015; --bg2:#20160d;
+    --surfA:#332417; --surfB:#2c1e13; --surfC:#261a10;
+    --bd1:#46331f; --bd2:#4f3a24; --bd3:#443020; --bd4:#3d2c1c;
     --amber:#e0912f; --green:#a6cf8f; --terra:#cf6b42;
     --txt:#f0e2cc; --txt2:#d8c4a4; --mut:#8f7657; --lab:#b98a52; --acc:#c9a877;
     --sans:"Space Grotesk",system-ui,sans-serif;
@@ -516,7 +516,7 @@ function getHtml() {
   html,body { height:100%; }
   body {
     margin:0; padding:14px; color:var(--txt); font-family:var(--sans); font-size:13px; overflow-x:hidden;
-    background:radial-gradient(120% 80% at 50% -5%, #2a1a10 0%, rgba(42,26,16,0) 55%), var(--bg2);
+    background:radial-gradient(120% 80% at 50% -5%, #43301c 0%, rgba(67,48,28,0) 55%), var(--bg2);
   }
 
   .panel {
