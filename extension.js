@@ -371,72 +371,138 @@ async function pushAction(projectName) {
 }
 
 // ---------------------------------------------------------------------------
-//  SUGERIR mensaje de commit a partir de los cambios (heuristico, local)
+//  SUGERIR mensaje de commit (analiza el diff real; genera asunto + cuerpo)
 // ---------------------------------------------------------------------------
 function baseName(p) { return p.split('/').pop().replace(/"/g, ''); }
 function topDir(p) { const parts = p.split('/'); return parts.length > 1 ? parts[0] : ''; }
-function briefList(names) {
-  const u = Array.from(new Set(names));
+function briefList(names, max) {
+  const u = Array.from(new Set(names)); max = max || 2;
   if (u.length === 1) return u[0];
-  if (u.length === 2) return `${u[0]} y ${u[1]}`;
-  return `${u[0]} y ${u.length - 1} archivos mas`;
+  if (u.length <= max) return u.slice(0, -1).join(', ') + ' y ' + u[u.length - 1];
+  return `${u.slice(0, max).join(', ')} y ${u.length - max} mas`;
 }
+function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+
+// clasificadores de archivo
+const isTest = p => /(^|\/)(tests?|__tests__|spec|e2e)(\/|$)|\.(test|spec)\.[a-z]+$/i.test(p);
+const isDoc = p => /\.(md|mdx|rst|txt)$/i.test(p) || /(^|\/)docs?\//i.test(p);
+const isStyle = p => /\.(css|scss|sass|less|styl)$/i.test(p);
+const isConfig = p => /(package(-lock)?\.json|yarn\.lock|pnpm-lock\.ya?ml|\.ya?ml|\.toml|dockerfile|\.dockerignore|\.gitignore|\.env|tsconfig|\.eslintrc|\.prettier|vite\.config|webpack|babel\.config)/i.test(p);
 
 async function suggestMessage(projectName) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'done' }); return; }
   post({ type: 'busy' });
+  post({ type: 'log', level: 'dim', text: 'Analizando diff…' });
 
-  // junta los cambios de todos los repos del proyecto
-  const added = [], modified = [], deleted = [], renamed = [];
+  const changes = [];        // {code,path,add,del,kind,repo}
+  let convStyle = false;     // el repo usa conventional commits?
+  let fixSignal = false, featSignal = false;
+  const multiRepo = proj.repos.length > 1;
+
   for (const repo of proj.repos) {
     const st = await git(repo.path, ['status', '--porcelain']);
-    for (const l of (st.out || '').split('\n').filter(Boolean)) {
-      const code = l.slice(0, 2), p = l.slice(3);
+    const rows = (st.out || '').split('\n').filter(Boolean);
+    if (!rows.length) continue;
+
+    // lineas +/- de lo ya trackeado (working tree vs HEAD)
+    const ns = await git(repo.path, ['diff', 'HEAD', '--numstat']);
+    const nmap = {};
+    (ns.out || '').split('\n').filter(Boolean).forEach(l => {
+      const t = l.split('\t'); const a = parseInt(t[0], 10) || 0; const d = parseInt(t[1], 10) || 0;
+      nmap[(t[2] || '').replace(/^"|"$/g, '')] = { add: a, del: d };
+    });
+
+    // estilo del historial reciente
+    const lg = await git(repo.path, ['log', '-10', '--format=%s']);
+    if (/^(feat|fix|docs|chore|refactor|style|test|build|perf)(\(|:|!)/mi.test(lg.out || '')) convStyle = true;
+
+    // muestra del contenido para detectar fix/feat
+    const diff = await git(repo.path, ['diff', 'HEAD', '--unified=0']);
+    const dsample = (diff.out || '').slice(0, 20000);
+    const addedLines = dsample.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++'));
+    const addedText = addedLines.join('\n');
+    if (/\b(fix|bug|error|catch|throw|corrige|arregla|hotfix|patch|npe|null|undefined check)\b/i.test(addedText)) fixSignal = true;
+    if (/\b(export (default |const |function |class )|def |func |public (class|function)|add(s|ed)? )/i.test(addedText)) featSignal = true;
+
+    for (const row of rows) {
+      const code = row.slice(0, 2); let p = row.slice(3).replace(/^"|"$/g, '');
       const c = code.replace(/\s/g, '');
-      if (code.includes('?')) added.push(p);
-      else if (c.includes('R')) renamed.push(p.split(' -> ').pop());
-      else if (c.includes('A')) added.push(p);
-      else if (c.includes('D')) deleted.push(p);
-      else if (c.includes('M') || c.includes('U') || c.includes('T')) modified.push(p);
-      else modified.push(p);
+      let kind = 'mod';
+      if (code.includes('?') || c.includes('A')) kind = 'add';
+      else if (c.includes('D')) kind = 'del';
+      else if (c.includes('R')) { kind = 'ren'; p = p.split(' -> ').pop().replace(/^"|"$/g, ''); }
+      let add = 0, del = 0;
+      if (code.includes('?')) {
+        try { const full = path.join(repo.path, p); const s = fs.statSync(full); if (s.isFile() && s.size < 200000) add = fs.readFileSync(full, 'utf8').split('\n').length; } catch (e) {}
+      } else if (nmap[p]) { add = nmap[p].add; del = nmap[p].del; }
+      changes.push({ code, path: p, add, del, kind, repo: repo.name });
     }
   }
-  const total = added.length + modified.length + deleted.length + renamed.length;
-  if (total === 0) {
+
+  if (!changes.length) {
     post({ type: 'log', level: 'warn', text: 'No hay cambios para sugerir un mensaje' });
     post({ type: 'done' });
     return;
   }
 
-  const all = [...added, ...modified, ...deleted, ...renamed];
-  // scope = carpeta de primer nivel mas comun
-  const dirCount = {};
-  for (const p of all) { const d = topDir(p); if (d) dirCount[d] = (dirCount[d] || 0) + 1; }
-  const scope = Object.keys(dirCount).sort((a, b) => dirCount[b] - dirCount[a])[0] || '';
+  const added = changes.filter(c => c.kind === 'add');
+  const modified = changes.filter(c => c.kind === 'mod');
+  const deleted = changes.filter(c => c.kind === 'del');
+  const renamed = changes.filter(c => c.kind === 'ren');
+  const paths = changes.map(c => c.path);
+  const totalAdd = changes.reduce((s, c) => s + c.add, 0);
+  const totalDel = changes.reduce((s, c) => s + c.del, 0);
 
-  // tipo conventional-commit aproximado
-  const onlyDocs = all.length > 0 && all.every(p => /\.(md|mdx|txt|rst)$/i.test(p));
-  const onlyMeta = all.length > 0 && all.every(p => /(package\.json|package-lock|\.ya?ml|\.toml|\.gitignore|\.env|dockerfile)/i.test(p));
+  // --- tipo ---
+  const allDocs = paths.every(isDoc);
+  const allStyle = paths.every(isStyle);
+  const allTest = paths.every(isTest);
+  const allConfig = paths.every(isConfig);
   let type;
-  if (onlyDocs) type = 'docs';
-  else if (onlyMeta) type = 'chore';
-  else if (added.length && !modified.length && !deleted.length) type = 'feat';
+  if (allDocs) type = 'docs';
+  else if (allTest) type = 'test';
+  else if (allStyle) type = 'style';
+  else if (allConfig) type = 'chore';
+  else if (fixSignal && !added.length) type = 'fix';
+  else if (added.length && (featSignal || !modified.length)) type = 'feat';
   else if (deleted.length && !added.length && !modified.length) type = 'chore';
-  else if (added.length) type = 'feat';
+  else if (renamed.length && !added.length && !modified.length) type = 'refactor';
+  else if (fixSignal) type = 'fix';
   else type = 'refactor';
 
-  // descripcion
-  const parts = [];
-  if (added.length) parts.push(`agrega ${briefList(added.map(baseName))}`);
-  if (modified.length) parts.push(`actualiza ${briefList(modified.map(baseName))}`);
-  if (renamed.length) parts.push(`renombra ${briefList(renamed.map(baseName))}`);
-  if (deleted.length) parts.push(`elimina ${briefList(deleted.map(baseName))}`);
-  let desc = parts.join(', ');
-  let message = `${type}${scope ? `(${scope})` : ''}: ${desc}`;
-  if (message.length > 100) message = message.slice(0, 97).trimEnd() + '...';
+  // --- scope: carpeta de primer nivel mas comun (ignora archivos raiz) ---
+  const dirCount = {};
+  for (const p of paths) { const d = topDir(p); if (d && d !== 'src') dirCount[d] = (dirCount[d] || 0) + 1; }
+  let scope = Object.keys(dirCount).sort((a, b) => dirCount[b] - dirCount[a])[0] || '';
+  if (multiRepo && new Set(changes.map(c => c.repo)).size > 1) scope = ''; // cambios en varios repos -> sin scope
 
-  post({ type: 'log', level: 'ok', text: `Sugerencia lista (${total} cambio(s))` });
+  // --- asunto ---
+  const parts = [];
+  if (added.length) parts.push(`agrega ${briefList(added.map(c => baseName(c.path)))}`);
+  if (modified.length) parts.push(`actualiza ${briefList(modified.map(c => baseName(c.path)))}`);
+  if (renamed.length) parts.push(`renombra ${briefList(renamed.map(c => baseName(c.path)))}`);
+  if (deleted.length) parts.push(`elimina ${briefList(deleted.map(c => baseName(c.path)))}`);
+  let subject = parts.join(', ');
+  const head = convStyle ? `${type}${scope ? `(${scope})` : ''}: ${subject}` : cap(subject);
+  let subjectLine = head.length > 72 ? head.slice(0, 69).trimEnd() + '...' : head;
+
+  // --- cuerpo con vinetas por archivo (ordenado por tamano de cambio) ---
+  const verbOf = { add: 'nuevo', del: 'eliminado', ren: 'renombrado', mod: '' };
+  const body = changes
+    .slice()
+    .sort((a, b) => (b.add + b.del) - (a.add + a.del))
+    .slice(0, 15)
+    .map(c => {
+      const stat = c.kind === 'add' ? `nuevo, +${c.add}` : c.kind === 'del' ? 'eliminado' : c.kind === 'ren' ? 'renombrado' : `+${c.add} -${c.del}`;
+      const label = multiRepo ? `${c.repo}/${c.path}` : c.path;
+      return `- ${label} (${stat})`;
+    });
+  if (changes.length > 15) body.push(`- …y ${changes.length - 15} archivo(s) mas`);
+
+  const message = `${subjectLine}\n\n${body.join('\n')}`;
+
+  post({ type: 'log', level: 'ok', text: `Sugerencia lista: ${changes.length} archivo(s), +${totalAdd} -${totalDel}` });
   post({ type: 'suggest', message });
   post({ type: 'done' });
 }
@@ -551,9 +617,19 @@ function getHtml() {
 
   .status { display:flex; flex-direction:column; gap:8px; }
   .srow { display:flex; align-items:center; gap:10px; flex-wrap:wrap; background:var(--surfB);
-    border:1px solid var(--bd3); border-radius:10px; padding:8px 10px 8px 12px; font-family:var(--mono); font-size:13px; }
+    border:1px solid var(--bd3); border-left:4px solid var(--bd3); border-radius:10px; padding:8px 10px 8px 11px; font-family:var(--mono); font-size:13px;
+    transition:border-color .2s ease, background .2s ease; }
   .srow.has { cursor:pointer; }
-  .srow .br { display:flex; align-items:center; gap:7px; flex:1 1 auto; min-width:0; color:var(--txt); font-weight:500;
+  /* estado glanceable: barra lateral + tinte + punto */
+  .srow.st-clean { border-left-color:#7ea874; }
+  .srow.st-dirty { border-left-color:var(--amber); background:linear-gradient(90deg,rgba(224,145,47,.10),var(--surfB) 55%); }
+  .srow.st-ahead { border-left-color:var(--amber); }
+  .srow.st-warn  { border-left-color:var(--terra); background:linear-gradient(90deg,rgba(207,107,66,.12),var(--surfB) 55%); }
+  .srow .dot { width:9px; height:9px; border-radius:50%; flex:none; background:var(--mut); }
+  .st-clean .dot { background:#7ea874; box-shadow:0 0 9px rgba(126,168,116,.8); }
+  .st-dirty .dot, .st-ahead .dot { background:var(--amber); box-shadow:0 0 9px rgba(224,145,47,.85); }
+  .st-warn .dot { background:var(--terra); box-shadow:0 0 9px rgba(207,107,66,.85); }
+  .srow .br { display:flex; align-items:center; gap:8px; flex:1 1 auto; min-width:0; color:var(--txt); font-weight:500;
     overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .srow .br .ico { color:#c98b4a; }
   .srow .caret { color:var(--mut); font-size:10px; transition:transform .15s ease; }
@@ -561,15 +637,17 @@ function getHtml() {
   .srow .repo { color:var(--mut); font-size:11px; }
   .srow .badges { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
   .badge { font-family:var(--mono); font-size:10px; font-weight:600; padding:3px 9px; border-radius:999px; }
-  .b-clean{ color:var(--green); background:rgba(126,168,116,.14); border:1px solid rgba(126,168,116,.5); box-shadow:0 0 10px -2px rgba(126,168,116,.6);}
-  .b-dirty{ color:#f0b88a; background:rgba(224,145,47,.14); border:1px solid rgba(224,145,47,.5);}
+  .badge.state { font-size:11px; font-weight:700; padding:4px 11px; }
+  .b-clean{ color:var(--green); background:rgba(126,168,116,.16); border:1px solid rgba(126,168,116,.5); box-shadow:0 0 10px -2px rgba(126,168,116,.6);}
+  .b-dirty{ color:#ffcf9a; background:rgba(224,145,47,.2); border:1px solid rgba(224,145,47,.65); box-shadow:0 0 10px -2px rgba(224,145,47,.6);}
   .b-up{ color:#f0d8a0; background:rgba(224,145,47,.14); border:1px solid rgba(224,145,47,.4);}
   .b-dn{ color:#e6b48a; background:rgba(207,107,66,.16); border:1px solid rgba(207,107,66,.45);}
   .b-noremote{ color:#f0a882; background:rgba(207,107,66,.18); border:1px solid rgba(207,107,66,.6);}
 
   /* fila de commit con boton sugerir */
-  .commitrow { display:flex; gap:8px; }
+  .commitrow { display:flex; gap:8px; align-items:flex-start; }
   .commitrow .input { flex:1; }
+  textarea.input { resize:none; min-height:38px; max-height:170px; line-height:1.45; overflow-y:auto; display:block; font-size:12.5px; }
   .sugg { width:40px; flex:none; border:1px solid var(--bd2); border-radius:10px; background:var(--surfA);
     color:var(--amber); font-size:16px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
   .sugg:hover { box-shadow:0 0 10px -3px rgba(224,145,47,.7); border-color:rgba(224,145,47,.5); }
@@ -679,7 +757,7 @@ function getHtml() {
     <div class="field">
       <label class="lbl">Tu trabajo</label>
       <div class="commitrow">
-        <input class="input" id="msg" placeholder="mensaje de commit&hellip;" maxlength="200">
+        <textarea class="input" id="msg" rows="1" placeholder="mensaje de commit&hellip;" maxlength="600"></textarea>
         <button class="sugg" id="suggest" title="Sugerir mensaje segun los cambios">&#10024;</button>
       </div>
     </div>
@@ -710,6 +788,7 @@ function getHtml() {
     screen.appendChild(d); screen.scrollTop=screen.scrollHeight; }
   function clearScreen(){ screen.innerHTML=''; }
   function setHint(html){ screen.innerHTML='<div class="greet">'+html+'</div>'; }
+  function autogrow(){ msg.style.height='auto'; msg.style.height=Math.min(msg.scrollHeight,170)+'px'; }
   function setBusy(b){ ['check','pull','commit','push','suggest'].forEach(id=>{ const el=$(id); if(el) el.disabled=b; }); sel.disabled=b;
     const bot=$('bot'); if(bot) bot.classList.toggle('working',b); }
   function requestStatus(){ if(sel.value){ statusEl.innerHTML='<div class="srow"><span class="repo">cargando estado...</span></div>'; vscode.postMessage({cmd:'status', project:sel.value}); } }
@@ -738,16 +817,21 @@ function getHtml() {
     statusEl.innerHTML='';
     repos.forEach(r=>{
       const hasFiles = r.files && r.files.length;
-      const row=document.createElement('div'); row.className='srow'+(hasFiles?' has':'');
+      let state='st-clean';
+      if(r.hasRemote===false) state='st-warn';
+      else if(r.dirty>0) state='st-dirty';
+      else if(r.behind>0) state='st-warn';
+      else if(r.ahead>0) state='st-ahead';
+      const row=document.createElement('div'); row.className='srow '+state+(hasFiles?' has':'');
       const multi = repos.length>1 ? '<span class="repo">'+r.name+'</span>' : '';
       const caret = hasFiles ? '<span class="caret">&#9656;</span>' : '';
       let badges='';
-      if(r.dirty>0) badges+='<span class="badge b-dirty">'+r.dirty+' cambios</span>';
-      else badges+='<span class="badge b-clean">limpio</span>';
+      if(r.dirty>0) badges+='<span class="badge state b-dirty">'+r.dirty+' cambio'+(r.dirty>1?'s':'')+'</span>';
+      else badges+='<span class="badge state b-clean">&#10003; limpio</span>';
       if(r.ahead>0) badges+=' <span class="badge b-up">&#8593;'+r.ahead+'</span>';
       if(r.behind>0) badges+=' <span class="badge b-dn">&#8595;'+r.behind+'</span>';
       if(r.hasRemote===false) badges+=' <span class="badge b-noremote">sin remoto</span>';
-      row.innerHTML='<span class="br"><span class="ico">&#9095;</span>'+r.branch+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
+      row.innerHTML='<span class="br"><span class="dot"></span><span class="ico">&#9095;</span>'+r.branch+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
       statusEl.appendChild(row);
       if(hasFiles){
         const fl=document.createElement('div'); fl.className='files';
@@ -768,7 +852,8 @@ function getHtml() {
   $('newbranch').addEventListener('click', ()=>{ if(!sel.value)return; vscode.postMessage({cmd:'newbranch', project:sel.value}); });
   $('check').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'check', project:sel.value}); });
   $('pull').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'pull', project:sel.value}); });
-  $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; });
+  msg.addEventListener('input', autogrow);
+  $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; autogrow(); });
   $('push').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'push', project:sel.value}); });
   $('suggest').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value}); });
   $('rescan').addEventListener('click', ()=>vscode.postMessage({cmd:'rescan'}));
@@ -786,7 +871,7 @@ function getHtml() {
       if(prev && projects.some(p=>p.name===prev)) sel.value=prev;
       requestStatus();
     } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint);
-    } else if(m.type==='suggest'){ msg.value=m.message; msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
+    } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
     } else if(m.type==='busy'){ setBusy(true);
     } else if(m.type==='done'){ setBusy(false);
     } else if(m.type==='log'){ line(m.text, m.level); }
