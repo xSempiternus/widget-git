@@ -66,6 +66,8 @@ function openPopout() {
 // ---------------------------------------------------------------------------
 async function onMessage(msg) {
   try {
+    // al iniciar una operacion que modifica algo, limpia la bandera de cancelacion
+    if (['check', 'pull', 'commit', 'push', 'switch', 'newbranch', 'suggest'].includes(msg.cmd)) opCancelled = false;
     switch (msg.cmd) {
       case 'ready': sendProjects(); break;
       case 'rescan': cachedProjects = null; sendProjects(); break;
@@ -77,6 +79,7 @@ async function onMessage(msg) {
       case 'push': await pushAction(msg.project); break;
       case 'switch': await switchBranch(msg.project, msg.branch); break;
       case 'newbranch': await newBranch(msg.project); break;
+      case 'cancel': cancelOp(); break;
       case 'popout': openPopout(); break;
     }
   } catch (e) {
@@ -148,15 +151,26 @@ function scan(dir, depth, maxDepth, out) {
 // ---------------------------------------------------------------------------
 //  Git helpers
 // ---------------------------------------------------------------------------
+let activeChild = null;      // proceso git en curso (para poder cancelarlo)
+let opCancelled = false;     // el usuario cancelo la operacion actual?
+
 function git(cwd, args) {
   return new Promise((resolve) => {
     const child = cp.spawn('git', args, { cwd, windowsHide: true });
+    activeChild = child;
     let out = '', err = '';
     child.stdout.on('data', d => out += d.toString());
     child.stderr.on('data', d => err += d.toString());
-    child.on('error', e => resolve({ code: -1, out: '', err: e.message }));
-    child.on('close', code => resolve({ code, out: out.trim(), err: err.trim() }));
+    child.on('error', e => { if (activeChild === child) activeChild = null; resolve({ code: -1, out: '', err: e.message }); });
+    child.on('close', code => { if (activeChild === child) activeChild = null; resolve({ code, out: out.trim(), err: err.trim() }); });
   });
+}
+
+// Cancela la operacion en curso: mata el proceso git activo y marca la bandera.
+function cancelOp() {
+  opCancelled = true;
+  if (activeChild) { try { activeChild.kill(); } catch (e) {} }
+  post({ type: 'log', level: 'warn', text: '>> Cancelando operacion...' });
 }
 
 async function defaultBranch(cwd) {
@@ -202,13 +216,28 @@ async function readRepo(repo) {
   const fileLines = lines.slice(1).filter(Boolean);
   const files = fileLines.slice(0, 60).map(l => ({ code: l.slice(0, 2), path: l.slice(3) }));
 
-  const br = await git(repo.path, ['for-each-ref', '--sort=-committerdate', '--format=%(refname:short)', 'refs/heads']);
-  const branches = br.out.split('\n').map(b => b.trim()).filter(Boolean);
+  // ramas LOCALES + REMOTAS (una sola llamada, ordenadas por actividad reciente)
+  const br = await git(repo.path, ['for-each-ref', '--sort=-committerdate', '--format=%(refname)', 'refs/heads', 'refs/remotes']);
+  const branches = [];
+  const seenB = new Set();
+  for (const raw of (br.out || '').split('\n').map(s => s.trim()).filter(Boolean)) {
+    let name;
+    if (raw.startsWith('refs/heads/')) name = raw.slice(11);
+    else if (raw.startsWith('refs/remotes/')) {
+      const rest = raw.slice(13);           // ej: origin/feature/x  |  origin/HEAD
+      if (/\/HEAD$/.test(rest)) continue;    // ignora el puntero HEAD del remoto
+      name = rest.replace(/^[^/]+\//, '');   // quita el nombre del remoto (origin/)
+    } else continue;
+    if (name && !seenB.has(name)) { seenB.add(name); branches.push(name); }
+  }
 
   const rem = await git(repo.path, ['remote', 'get-url', 'origin']);
   const hasRemote = rem.code === 0 && !!rem.out;
+  // la rama actual existe en el remoto? (aunque no tenga upstream configurado)
+  const remoteHasBranch = hasRemote && branch && branch !== '(detached)' &&
+    (await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).code === 0;
 
-  return { name: repo.name, branch, ahead, behind, dirty: fileLines.length, hasUp, hasRemote, remoteUrl: rem.out || '', files, branches };
+  return { name: repo.name, branch, ahead, behind, dirty: fileLines.length, hasUp, hasRemote, remoteHasBranch, remoteUrl: rem.out || '', files, branches };
 }
 
 async function sendStatus(projectName) {
@@ -237,7 +266,13 @@ function assistantHint(projName, results) {
   }
   if (dirty > 0) return `Tienes <b>${dirty} cambio(s) sin commitear</b> &#9749; &mdash; escribe un mensaje (o dale &#10024;) y Commit.`;
   if (ahead > 0) return `Tienes <b>${ahead} commit(s) sin pushear</b> &#8593; &mdash; dale <b>Push</b> para subirlos.`;
-  if (noUp.length) return `Tu rama a&uacute;n no est&aacute; en el remoto &#8593; &mdash; dale <b>Push</b> y la creo en GitHub.`;
+  // rama sin upstream que YA existe en el remoto: no es "publicar", es "enlazar"
+  const linkNeeded = noUp.filter(r => r.remoteHasBranch);
+  if (linkNeeded.length) {
+    const r = linkNeeded[0];
+    return `Tu rama <b>ya existe en GitHub</b> pero no est&aacute; enlazada (por eso VS Code dice &laquo;Publish Branch&raquo;). Enl&aacute;zala: <span class="mono">git branch --set-upstream-to=origin/${r.branch}</span> y luego <b>Pull</b>. No uses Publish.`;
+  }
+  if (noUp.length) return `Tu rama es <b>nueva</b> (no est&aacute; en el remoto) &#8593; &mdash; dale <b>Push</b> y la creo en GitHub.`;
   if (behind > 0) return `Hay <b>${behind} commit(s) nuevo(s)</b> en el remoto &#8595; &mdash; dale <b>Pull</b>.`;
   return `Todo al d&iacute;a &#10024; &iquest;un cafecito? &#9749;`;
 }
@@ -249,10 +284,11 @@ async function runMain(kind, projectName) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'log', level: 'err', text: 'Proyecto no encontrado' }); post({ type: 'done' }); return; }
   post({ type: 'busy' });
-  post({ type: 'log', level: 'hdr', text: `== ${kind === 'check' ? 'CHECK MAIN' : 'PULL MAIN'} :: ${proj.name} ==` });
+  post({ type: 'log', level: 'hdr', text: `== ${kind === 'check' ? 'CHECK' : 'PULL'} :: ${proj.name} ==` });
 
   let pending = 0, conflicts = 0;
   for (const repo of proj.repos) {
+    if (opCancelled) break;
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
     const dirty = await git(repo.path, ['status', '--porcelain']);
@@ -260,21 +296,56 @@ async function runMain(kind, projectName) {
     const main = await defaultBranch(repo.path);
 
     if (kind === 'check') {
-      const f = await git(repo.path, ['fetch', 'origin', main, '--quiet']);
+      post({ type: 'log', level: 'dim', text: `${tag}: fetch --all --prune...` });
+      const f = await git(repo.path, ['fetch', '--all', '--prune', '--quiet']);
       if (f.code !== 0) { post({ type: 'log', level: 'err', text: `${tag}: no se pudo conectar al remoto` }); continue; }
-      const behind = parseInt((await git(repo.path, ['rev-list', '--count', `HEAD..origin/${main}`])).out || '0', 10) || 0;
-      if (behind <= 0) post({ type: 'log', level: 'ok', text: `${tag}: al dia con ${main}` });
+      // compara TU rama actual contra su remoto:
+      //  1) upstream si existe; 2) si no, origin/<misma-rama> si existe; 3) si no, origin/main
+      const up = await git(repo.path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+      let ref, refName;
+      if (up.code === 0) { ref = '@{u}'; refName = up.out || 'remoto'; }
+      else if ((await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).code === 0) {
+        ref = `origin/${branch}`; refName = `origin/${branch} (sin upstream)`;
+      } else { ref = `origin/${main}`; refName = `origin/${main}`; }
+      const behind = parseInt((await git(repo.path, ['rev-list', '--count', `HEAD..${ref}`])).out || '0', 10) || 0;
+      if (behind <= 0) post({ type: 'log', level: 'ok', text: `${tag}: al dia con ${refName}` });
       else {
         pending += behind;
-        post({ type: 'log', level: 'warn', text: `${tag}: ${behind} commit(s) nuevo(s) en ${main} -> PULL PENDIENTE` });
-        (await git(repo.path, ['log', `HEAD..origin/${main}`, '--oneline', '-10'])).out.split('\n').filter(Boolean)
+        post({ type: 'log', level: 'warn', text: `${tag}: ${behind} commit(s) nuevo(s) en ${refName}` });
+        (await git(repo.path, ['log', `HEAD..${ref}`, '--oneline', '-10'])).out.split('\n').filter(Boolean)
           .forEach(l => post({ type: 'log', level: 'dim', text: '   ' + l }));
       }
+      // aviso extra si main tambien avanzo y no estas en main
+      if (branch !== main) {
+        const bm = parseInt((await git(repo.path, ['rev-list', '--count', `HEAD..origin/${main}`])).out || '0', 10) || 0;
+        if (bm > 0) post({ type: 'log', level: 'dim', text: `   (${main} va ${bm} commit(s) adelante)` });
+      }
     } else {
+      // PULL de TU rama actual desde el remoto (no de main)
+      const up = await git(repo.path, ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}']);
+      let hasUp = up.code === 0;
+      const originHas = (await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).code === 0;
+      if (!hasUp && !originHas) {
+        post({ type: 'log', level: 'warn', text: `${tag}: tu rama no esta en el remoto -> nada que traer (usa Push para subirla)` });
+        continue;
+      }
+      // enlaza la rama si existe en el remoto pero no tiene upstream (arregla "Publish Branch")
+      if (!hasUp && originHas) {
+        const su = await git(repo.path, ['branch', `--set-upstream-to=origin/${branch}`]);
+        if (su.code === 0) { hasUp = true; post({ type: 'log', level: 'dim', text: `${tag}: enlazada a origin/${branch}` }); }
+      }
       const before = (await git(repo.path, ['rev-parse', 'HEAD'])).out;
-      post({ type: 'log', level: 'dim', text: `${tag}: pull origin ${main}...` });
-      const p = await git(repo.path, ['pull', 'origin', main, '--no-rebase']);
-      if (p.code !== 0) { await git(repo.path, ['merge', '--abort']); conflicts++; post({ type: 'log', level: 'err', text: `${tag}: CONFLICTO - merge abortado` }); continue; }
+      post({ type: 'log', level: 'dim', text: `${tag}: pull de origin/${branch}...` });
+      const p = hasUp
+        ? await git(repo.path, ['pull', '--no-rebase'])
+        : await git(repo.path, ['pull', 'origin', branch, '--no-rebase']);
+      if (p.code !== 0) {
+        await git(repo.path, ['merge', '--abort']);
+        conflicts++;
+        post({ type: 'log', level: 'err', text: `${tag}: no se pudo integrar (conflicto o error)` });
+        (p.err || p.out || '').split('\n').filter(Boolean).slice(0, 3).forEach(e => post({ type: 'log', level: 'dim', text: '   ' + e }));
+        continue;
+      }
       const commits = (await git(repo.path, ['log', `${before}..HEAD`, '--oneline'])).out.split('\n').filter(Boolean);
       if (commits.length === 0) post({ type: 'log', level: 'ok', text: `${tag}: ya estaba al dia` });
       else {
@@ -283,7 +354,8 @@ async function runMain(kind, projectName) {
       }
     }
   }
-  post({ type: 'log', level: 'hdr', text: kind === 'check'
+  post({ type: 'log', level: 'hdr', text: opCancelled ? '>> Operacion cancelada'
+    : kind === 'check'
     ? (pending > 0 ? `>> ${pending} commit(s) pendientes de pull` : '>> Todo al dia')
     : (conflicts > 0 ? `>> ${conflicts} repo(s) con conflicto` : '>> Pull completo') });
   post({ type: 'done' });
@@ -302,6 +374,7 @@ async function commitAction(projectName, message) {
 
   let done = 0;
   for (const repo of proj.repos) {
+    if (opCancelled) break;
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
     const st = await git(repo.path, ['status', '--porcelain']);
@@ -312,7 +385,7 @@ async function commitAction(projectName, message) {
     done++;
     post({ type: 'log', level: 'ok', text: `${tag}: commit hecho` });
   }
-  post({ type: 'log', level: 'hdr', text: done > 0 ? `>> ${done} repo(s) commiteados. Ahora puedes Push.` : '>> No habia cambios para commitear' });
+  post({ type: 'log', level: 'hdr', text: opCancelled ? '>> Operacion cancelada' : done > 0 ? `>> ${done} repo(s) commiteados. Ahora puedes Push.` : '>> No habia cambios para commitear' });
   post({ type: 'done' });
   await sendStatus(projectName);
 }
@@ -328,6 +401,7 @@ async function pushAction(projectName) {
 
   let failed = 0;
   for (const repo of proj.repos) {
+    if (opCancelled) break;
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
 
@@ -365,7 +439,7 @@ async function pushAction(projectName) {
     }
     post({ type: 'log', level: 'ok', text: `${tag}: push OK` });
   }
-  post({ type: 'log', level: 'hdr', text: failed > 0 ? `>> Push con ${failed} error(es)` : '>> Push terminado' });
+  post({ type: 'log', level: 'hdr', text: opCancelled ? '>> Operacion cancelada' : failed > 0 ? `>> Push con ${failed} error(es)` : '>> Push terminado' });
   post({ type: 'done' });
   await sendStatus(projectName);
 }
@@ -518,9 +592,11 @@ async function switchBranch(projectName, branch) {
   for (const repo of proj.repos) {
     const cur = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     if (cur === branch) { post({ type: 'log', level: 'dim', text: `${repo.name}: ya estaba en ${branch}` }); continue; }
-    const exists = await git(repo.path, ['rev-parse', '--verify', '--quiet', branch]);
-    if (exists.code !== 0) { post({ type: 'log', level: 'dim', text: `${repo.name}: no tiene la rama ${branch}` }); continue; }
-    const co = await git(repo.path, ['checkout', branch]);
+    const hasLocal = (await git(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/heads/' + branch])).code === 0;
+    const hasRemoteBranch = (await git(repo.path, ['rev-parse', '--verify', '--quiet', 'refs/remotes/origin/' + branch])).code === 0;
+    if (!hasLocal && !hasRemoteBranch) { post({ type: 'log', level: 'dim', text: `${repo.name}: no tiene la rama ${branch}` }); continue; }
+    if (!hasLocal) post({ type: 'log', level: 'dim', text: `${repo.name}: creando local desde origin/${branch}...` });
+    const co = await git(repo.path, ['checkout', branch]); // git crea el tracking local si solo existe en el remoto
     if (co.code !== 0) { post({ type: 'log', level: 'err', text: `${repo.name}: no se pudo cambiar - ${(co.err || co.out).split('\n')[0]}` }); continue; }
     post({ type: 'log', level: 'ok', text: `${repo.name}: ahora en ${branch}` });
   }
@@ -714,6 +790,12 @@ function getHtml() {
   .dim{color:var(--mut);} .hdr{color:#e0a35c;font-weight:600;} .info{color:var(--txt2);}
   .mono { font-family:var(--mono); }
 
+  .cancelbtn { display:none; width:100%; border:1px solid rgba(207,107,66,.6); border-radius:10px;
+    background:rgba(207,107,66,.16); color:#f0a882; font-family:var(--mono); font-size:11px; font-weight:600;
+    letter-spacing:.06em; text-transform:uppercase; padding:9px 10px; cursor:pointer; }
+  .cancelbtn:hover { background:rgba(207,107,66,.26); box-shadow:0 0 12px -4px rgba(207,107,66,.7); }
+  .cancelbtn.show { display:block; }
+
   .ghostrow { display:flex; gap:10px; }
   .ghost { flex:1; display:flex; align-items:center; justify-content:center; gap:7px; border:1px solid var(--bd1); border-radius:10px;
     background:transparent; color:var(--acc); font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.1em;
@@ -747,11 +829,11 @@ function getHtml() {
       <button class="newbr" id="newbranch" title="Crear rama nueva">&#43;</button>
     </div>
 
-    <div class="divider"><span>Sincronizar main</span></div>
+    <div class="divider"><span>Sincronizar con el remoto</span></div>
 
     <div class="cards">
-      <button class="cardbtn c-check" id="check"><span class="ic"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span><span class="tx"><b>Check</b><small>fetch &amp; avisa</small></span></button>
-      <button class="cardbtn c-pull" id="pull"><span class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14"/></svg></span><span class="tx"><b>Pull</b><small>integra main</small></span></button>
+      <button class="cardbtn c-check" id="check"><span class="ic"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"/></svg></span><span class="tx"><b>Check</b><small>busca cambios</small></span></button>
+      <button class="cardbtn c-pull" id="pull"><span class="ic"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-5-5m5 5l5-5M5 21h14"/></svg></span><span class="tx"><b>Pull</b><small>trae tu rama</small></span></button>
     </div>
 
     <div class="field">
@@ -766,6 +848,8 @@ function getHtml() {
       <button class="cardbtn c-commit" id="commit"><span class="ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M2 12h6M16 12h6"/></svg></span><span class="tx"><b>Commit</b><small>guarda cambios</small></span></button>
       <button class="cardbtn c-push" id="push"><span class="ic"><svg viewBox="0 0 24 24"><path d="M12 21V9m0 0l-5 5m5-5l5 5M5 3h14"/></svg></span><span class="tx"><b>Push</b><small>sube a GitHub</small></span></button>
     </div>
+
+    <button class="cancelbtn" id="cancel">&#9209; Cancelar operaci&oacute;n</button>
 
     <div class="bubble">
       <div class="bot mimg-full" id="bot"></div>
@@ -790,7 +874,8 @@ function getHtml() {
   function setHint(html){ screen.innerHTML='<div class="greet">'+html+'</div>'; }
   function autogrow(){ msg.style.height='auto'; msg.style.height=Math.min(msg.scrollHeight,170)+'px'; }
   function setBusy(b){ ['check','pull','commit','push','suggest'].forEach(id=>{ const el=$(id); if(el) el.disabled=b; }); sel.disabled=b;
-    const bot=$('bot'); if(bot) bot.classList.toggle('working',b); }
+    const bot=$('bot'); if(bot) bot.classList.toggle('working',b);
+    const cb=$('cancel'); if(cb) cb.classList.toggle('show',b); }
   function requestStatus(){ if(sel.value){ statusEl.innerHTML='<div class="srow"><span class="repo">cargando estado...</span></div>'; vscode.postMessage({cmd:'status', project:sel.value}); } }
 
   function fileClass(code){
@@ -802,9 +887,10 @@ function getHtml() {
   }
 
   function renderBranchBar(branches, current){
-    const bar=$('branchbar'), bsel=$('branchsel');
+    const bar=$('branchbar'), bsel=$('branchsel'), blab=bar.querySelector('.blabel');
     if(!branches || !branches.length){ bar.style.display='none'; return; }
     bar.style.display='flex';
+    if(blab) blab.textContent='Rama ('+branches.length+')';
     bsel.innerHTML='';
     if(!current){ const o=document.createElement('option'); o.value=''; o.textContent='(varias ramas)'; bsel.appendChild(o); }
     branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; if(b===current)o.selected=true; bsel.appendChild(o); });
@@ -856,6 +942,7 @@ function getHtml() {
   $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; autogrow(); });
   $('push').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'push', project:sel.value}); });
   $('suggest').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value}); });
+  $('cancel').addEventListener('click', ()=>{ line('Cancelando…','warn'); vscode.postMessage({cmd:'cancel'}); });
   $('rescan').addEventListener('click', ()=>vscode.postMessage({cmd:'rescan'}));
   $('refresh').addEventListener('click', requestStatus);
   $('popout').addEventListener('click', ()=>vscode.postMessage({cmd:'popout'}));
