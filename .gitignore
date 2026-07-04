@@ -2,10 +2,9 @@
 _*.png
 _*.html
 _*.woff2
-_prev.js
-_buildfonts.js
-_makepreview.js
-_scantest.js
+_*.js
+_unzip/
+media/*.zip
 
 # extension empaquetada (usar Releases de GitHub, no versionar el binario)
 *.vsix

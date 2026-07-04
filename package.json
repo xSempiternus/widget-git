@@ -1,8 +1,8 @@
 {
   "name": "git-arcade",
-  "displayName": "GIT ARCADE",
-  "description": "Widget arcade para hacer check/pull de main en cualquier repo o proyecto (auto-detectado).",
-  "version": "1.7.0",
+  "displayName": "Brew",
+  "description": "Brew: panel de git tipo cafeteria (check/pull/commit/push, rama, estado) para cualquier proyecto detectado.",
+  "version": "2.0.0",
   "publisher": "nikolas",
   "engines": {
     "vscode": "^1.75.0"
@@ -20,7 +20,7 @@
       "activitybar": [
         {
           "id": "gitArcadeContainer",
-          "title": "Git Arcade",
+          "title": "Brew",
           "icon": "media/arcade.svg"
         }
       ]
@@ -30,7 +30,7 @@
         {
           "id": "gitArcadeView",
           "type": "webview",
-          "name": "Git Arcade"
+          "name": "Brew"
         }
       ]
     },
