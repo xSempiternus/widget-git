@@ -1,0 +1,7 @@
+Apuntes reunion Nous Diseño
+* Unificar la tipografia, mejorarlas y hacerlas acorde al concepto de calidez y cafeteria. Algo mas suavizado.
+* Corregir el interletraje ydejarlo unificado tambien.
+* El boton check, se ponga en verde y con el visto cuando se presione una vez y haga la accion. 
+* Los botones tienen muchos colores, hay que tambien unificar y corregir eso y que tengan el mismo lenguaje de degradado. Que todos tengan estados, el estado base/normal y que una vez que se le haga la accion, se muestre con algun indicador.
+* Y re escanear no tienen diseño como tal, estos sirven para actualizar el estado, quizas poder agregar estos como un simple icono de actualizar arrib a la derecha y listo. Quizas ahi pueda crearse espacio para otra utilidad.
+* El color de la fuente, tambien hay que unificar las gamas de colores como tal. Que sea la correcta y apegada a un diseñador profesional de UX/UI.

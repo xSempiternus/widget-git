@@ -743,14 +743,20 @@ function getHtml() {
     --bd1:#46331f; --bd2:#4f3a24; --bd3:#443020; --bd4:#3d2c1c;
     --amber:#e0912f; --green:#a6cf8f; --terra:#cf6b42;
     --txt:#f0e2cc; --txt2:#d8c4a4; --mut:#8f7657; --lab:#b98a52; --acc:#c9a877;
+    --ok:#8fbf7a;
     --sans:"Space Grotesk",system-ui,sans-serif;
     --mono:"IBM Plex Mono",ui-monospace,monospace;
-    --brand:"Bungee",var(--sans);
+    --brand:var(--sans);
+    /* interletraje unico para todas las micro-etiquetas en mayusculas */
+    --track:.14em;
+    /* lenguaje de degradado unificado para los botones (ambar/cafe de marca) */
+    --grad:linear-gradient(150deg,#e6982f,#c8781f);
+    --grad-soft:linear-gradient(160deg,var(--surfA),var(--surfB));
   }
   * { box-sizing:border-box; }
   html,body { height:100%; }
   body {
-    margin:0; padding:14px; color:var(--txt); font-family:var(--sans); font-size:13px; overflow-x:hidden;
+    margin:0; padding:14px; color:var(--txt); font-family:var(--sans); font-size:13px; letter-spacing:.01em; overflow-x:hidden;
     background:radial-gradient(120% 80% at 50% -5%, #43301c 0%, rgba(67,48,28,0) 55%), var(--bg2);
   }
 
@@ -763,17 +769,20 @@ function getHtml() {
   .header { display:flex; align-items:center; justify-content:space-between; }
   .brand { display:flex; align-items:center; gap:10px; }
   .logo { width:34px; height:34px; flex:none; filter:drop-shadow(0 0 6px rgba(224,145,47,.4)); }
-  .wordmark { font-family:var(--brand); font-size:19px; line-height:1; color:#f7ecd4;
-    text-shadow:0 0 8px rgba(224,145,47,.75),0 0 18px rgba(224,145,47,.35); animation:flick 4s infinite; }
+  .wordmark { font-family:var(--brand); font-weight:700; font-size:21px; letter-spacing:.015em; line-height:1; color:#f7ecd4;
+    text-shadow:0 0 8px rgba(224,145,47,.6),0 0 18px rgba(224,145,47,.3); animation:flick 4s infinite; }
   @keyframes flick { 0%,96%,100%{opacity:1;} 98%{opacity:.85;} }
-  .expand { width:32px; height:32px; flex:none; border:1px solid var(--bd1); border-radius:9px; background:transparent;
-    color:var(--acc); cursor:pointer; display:flex; align-items:center; justify-content:center; }
+  .hactions { display:flex; align-items:center; gap:7px; }
+  .expand { width:32px; height:32px; flex:none; border:1px solid var(--bd1); border-radius:9px; background:var(--surfA);
+    color:var(--acc); cursor:pointer; display:flex; align-items:center; justify-content:center; transition:color .18s ease, border-color .18s ease, box-shadow .18s ease; }
   .expand:hover { border-color:var(--amber); color:var(--amber); box-shadow:0 0 10px -2px rgba(224,145,47,.6); }
+  .expand.spin svg { animation:spin .6s ease; }
+  @keyframes spin { from{transform:rotate(0);} to{transform:rotate(360deg);} }
   .expand svg { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.6; }
   .mimg-head,.mimg-full { background-size:contain; background-position:center; background-repeat:no-repeat; }
 
   .field { display:flex; flex-direction:column; gap:6px; }
-  .lbl { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.18em; text-transform:uppercase; color:var(--lab); }
+  .lbl { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:var(--track); text-transform:uppercase; color:var(--lab); }
   select, .input {
     width:100%; font-family:var(--sans); font-size:13px; font-weight:500; color:var(--txt);
     background:var(--surfA); border:1px solid var(--bd2); border-radius:10px; padding:9px 12px; outline:none;
@@ -835,7 +844,7 @@ function getHtml() {
 
   /* barra de rama (label + select + boton +) */
   .branchbar { display:flex; align-items:center; gap:8px; }
-  .branchbar .blabel { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.18em; text-transform:uppercase; color:var(--lab); flex:none; }
+  .branchbar .blabel { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:var(--track); text-transform:uppercase; color:var(--lab); flex:none; }
   .branchbar select { flex:1; }
   .newbr { width:38px; height:38px; flex:none; border:1px solid var(--bd2); border-radius:10px; background:var(--surfA);
     color:var(--amber); font-size:20px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
@@ -845,29 +854,42 @@ function getHtml() {
   .divider { display:flex; align-items:center; gap:10px; }
   .divider::before,.divider::after { content:""; flex:1; height:1px; background:linear-gradient(90deg,transparent,var(--bd1)); }
   .divider::after { background:linear-gradient(90deg,var(--bd1),transparent); }
-  .divider span { font-family:var(--mono); font-size:9px; font-weight:600; letter-spacing:.2em; text-transform:uppercase; color:var(--mut); }
+  .divider span { font-family:var(--mono); font-size:9px; font-weight:600; letter-spacing:var(--track); text-transform:uppercase; color:var(--mut); }
 
   /* botones tarjeta */
   .cards { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
-  .cardbtn { display:flex; align-items:center; gap:10px; text-align:left; border-radius:11px; padding:10px 11px; cursor:pointer;
-    border:1px solid transparent; transition:transform .07s ease, box-shadow .2s ease, filter .2s ease; }
+  .cardbtn { position:relative; display:flex; align-items:center; gap:10px; text-align:left; border-radius:11px; padding:10px 11px; cursor:pointer;
+    border:1px solid var(--bd2); transition:transform .07s ease, box-shadow .2s ease, filter .2s ease, border-color .2s ease, background .2s ease; }
   .cardbtn .ic { width:28px; height:28px; flex:none; border-radius:8px; display:flex; align-items:center; justify-content:center; }
   .cardbtn .ic svg { width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
   .cardbtn .tx { display:flex; flex-direction:column; min-width:0; line-height:1.15; }
-  .cardbtn .tx b { font-family:var(--sans); font-size:12px; }
-  .cardbtn .tx small { font-family:var(--mono); font-size:9px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cardbtn .tx b { font-family:var(--sans); font-size:12px; font-weight:600; }
+  .cardbtn .tx small { font-family:var(--mono); font-size:9px; margin-top:2px; letter-spacing:.02em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .cardbtn:active { transform:translateY(1px); }
-  .cardbtn:disabled { filter:grayscale(.5) brightness(.65); cursor:not-allowed; }
-  .c-check { background:#1c2419; border-color:rgba(126,168,116,.4); color:#a6cf8f; }
-  .c-check .ic { background:rgba(126,168,116,.14); } .c-check .tx b { color:#e7f2df; } .c-check .tx small { color:#7fa06f; }
-  .c-pull { background:#251a10; border-color:rgba(224,145,47,.4); color:#e0912f; }
-  .c-pull .ic { background:rgba(224,145,47,.14); } .c-pull .tx b { color:#f4e6c8; } .c-pull .tx small { color:#b98a52; }
-  .c-check:hover,.c-pull:hover { filter:brightness(1.12); }
-  .c-commit { background:linear-gradient(150deg,#e6982f,#c8781f); color:#2a1503; box-shadow:0 0 16px -4px rgba(224,145,47,.7); }
-  .c-commit .ic { background:rgba(0,0,0,.14); } .c-commit .tx b { font-weight:700; } .c-commit .tx small { color:#2a1503; opacity:.75; }
-  .c-push { background:linear-gradient(150deg,#cf6b42,#b1502f); color:#fbeadf; box-shadow:0 0 16px -4px rgba(207,107,66,.6); }
-  .c-push .ic { background:rgba(0,0,0,.14); } .c-push .tx b { font-weight:700; } .c-push .tx small { color:#fbeadf; opacity:.8; }
-  .c-commit:hover { box-shadow:0 0 20px -3px rgba(224,145,47,.85); } .c-push:hover { box-shadow:0 0 20px -3px rgba(207,107,66,.75); }
+  .cardbtn:disabled { filter:grayscale(.4) brightness(.7); cursor:not-allowed; }
+
+  /* secundarios (Check / Pull): superficie calida + acento ambar */
+  .c-check, .c-pull { background:var(--grad-soft); border-color:var(--bd2); color:var(--amber); }
+  .c-check .ic, .c-pull .ic { background:rgba(224,145,47,.14); }
+  .c-check .tx b, .c-pull .tx b { color:var(--txt); }
+  .c-check .tx small, .c-pull .tx small { color:var(--lab); }
+  .c-check:hover, .c-pull:hover { border-color:rgba(224,145,47,.55); box-shadow:0 0 14px -5px rgba(224,145,47,.6); }
+
+  /* primarios (Commit / Push): degradado ambar de marca */
+  .c-commit, .c-push { background:var(--grad); border-color:rgba(224,145,47,.5); color:#2a1503; box-shadow:0 0 16px -6px rgba(224,145,47,.6); }
+  .c-commit .ic, .c-push .ic { background:rgba(0,0,0,.14); }
+  .c-commit .tx b, .c-push .tx b { color:#2a1503; font-weight:700; }
+  .c-commit .tx small, .c-push .tx small { color:#2a1503; opacity:.72; }
+  .c-commit:hover, .c-push:hover { box-shadow:0 0 20px -4px rgba(224,145,47,.85); filter:brightness(1.04); }
+
+  /* estado HECHO: cualquier boton se pone verde con el visto tras la accion */
+  .cardbtn.done { background:linear-gradient(160deg,#20291b,#1a2216) !important; border-color:rgba(143,191,122,.6) !important;
+    box-shadow:0 0 16px -5px rgba(143,191,122,.5) !important; }
+  .cardbtn.done .ic { background:rgba(143,191,122,.18) !important; color:var(--ok) !important; }
+  .cardbtn.done .ic svg { display:none; }
+  .cardbtn.done .ic::after { content:"\\2713"; font-size:17px; font-weight:700; line-height:1; color:var(--ok); }
+  .cardbtn.done .tx b { color:#dcecd0 !important; }
+  .cardbtn.done .tx small { color:var(--ok) !important; }
 
   /* burbuja mascota + feedback */
   .bubble { display:flex; gap:10px; background:var(--surfC); border:1px solid var(--bd4); border-left:3px solid var(--amber);
@@ -885,16 +907,9 @@ function getHtml() {
 
   .cancelbtn { display:none; width:100%; border:1px solid rgba(207,107,66,.6); border-radius:10px;
     background:rgba(207,107,66,.16); color:#f0a882; font-family:var(--mono); font-size:11px; font-weight:600;
-    letter-spacing:.06em; text-transform:uppercase; padding:9px 10px; cursor:pointer; }
+    letter-spacing:var(--track); text-transform:uppercase; padding:9px 10px; cursor:pointer; }
   .cancelbtn:hover { background:rgba(207,107,66,.26); box-shadow:0 0 12px -4px rgba(207,107,66,.7); }
   .cancelbtn.show { display:block; }
-
-  .ghostrow { display:flex; gap:10px; }
-  .ghost { flex:1; display:flex; align-items:center; justify-content:center; gap:7px; border:1px solid var(--bd1); border-radius:10px;
-    background:transparent; color:var(--acc); font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:.1em;
-    text-transform:uppercase; padding:8px 10px; cursor:pointer; }
-  .ghost:hover { border-color:var(--amber); color:var(--amber); }
-  .ghost svg { width:13px; height:13px; stroke:currentColor; fill:none; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
 </style>
 </head>
 <body>
@@ -904,9 +919,17 @@ function getHtml() {
         <div class="logo mimg-head"></div>
         <div class="wordmark">Brew</div>
       </div>
-      <button class="expand" id="popout" title="Abrir en ventana flotante">
-        <svg viewBox="0 0 20 20"><path d="M8 3H3v5M12 17h5v-5M3 3l6 6M17 17l-6-6"/></svg>
-      </button>
+      <div class="hactions">
+        <button class="expand" id="refresh" title="Actualizar estado">
+          <svg viewBox="0 0 20 20"><path d="M3 10a7 7 0 0 1 12-5l2 2M17 10a7 7 0 0 1-12 5l-2-2M15 3v4h-4M5 17v-4h4"/></svg>
+        </button>
+        <button class="expand" id="rescan" title="Re-escanear proyectos">
+          <svg viewBox="0 0 20 20"><circle cx="9" cy="9" r="5"/><path d="M17 17l-4-4"/></svg>
+        </button>
+        <button class="expand" id="popout" title="Abrir en ventana flotante">
+          <svg viewBox="0 0 20 20"><path d="M8 3H3v5M12 17h5v-5M3 3l6 6M17 17l-6-6"/></svg>
+        </button>
+      </div>
     </div>
 
     <div class="field">
@@ -948,11 +971,6 @@ function getHtml() {
       <div class="bot mimg-full" id="bot"></div>
       <div class="screen" id="screen"><div class="greet">Buenas &#9749; Elige un <b>proyecto</b> y te digo en qu&eacute; <b>rama</b> andas.</div></div>
     </div>
-
-    <div class="ghostrow">
-      <button class="ghost" id="rescan"><svg viewBox="0 0 20 20"><path d="M3 10a7 7 0 0 1 12-5l2 2M17 10a7 7 0 0 1-12 5l-2-2M15 3v4h-4M5 17v-4h4"/></svg>Re-escanear</button>
-      <button class="ghost" id="refresh"><svg viewBox="0 0 20 20"><path d="M6 3h8v14H6zM8 6h4M8 9h4M8 12h3"/></svg>Estado</button>
-    </div>
   </div>
 
 <script>
@@ -960,6 +978,9 @@ function getHtml() {
   const $ = id => document.getElementById(id);
   const screen = $('screen'), sel = $('project'), statusEl = $('status'), msg = $('msg');
   let projects = [];
+  let lastAction = null;      // ultimo boton de accion pulsado (para marcarlo "hecho")
+  let doneTimer = null;
+  let opHadError = false;     // hubo algun error durante la operacion en curso?
 
   function line(text, level){ const d=document.createElement('div'); d.className=level||'info'; d.textContent=text;
     screen.appendChild(d); screen.scrollTop=screen.scrollHeight; }
@@ -968,7 +989,14 @@ function getHtml() {
   function autogrow(){ msg.style.height='auto'; msg.style.height=Math.min(msg.scrollHeight,170)+'px'; }
   function setBusy(b){ ['check','pull','commit','push','suggest'].forEach(id=>{ const el=$(id); if(el) el.disabled=b; }); sel.disabled=b;
     const bot=$('bot'); if(bot) bot.classList.toggle('working',b);
-    const cb=$('cancel'); if(cb) cb.classList.toggle('show',b); }
+    const cb=$('cancel'); if(cb) cb.classList.toggle('show',b);
+    if(b){ clearDone(); opHadError=false; } }
+  // limpia el visto verde de todos los botones de accion
+  function clearDone(){ if(doneTimer){ clearTimeout(doneTimer); doneTimer=null; }
+    ['check','pull','commit','push'].forEach(id=>{ const el=$(id); if(el) el.classList.remove('done'); }); }
+  // marca el ultimo boton pulsado como "hecho" (verde + visto) unos segundos
+  function markDone(){ if(!lastAction || opHadError){ lastAction=null; return; } const el=lastAction; lastAction=null;
+    clearDone(); el.classList.add('done'); doneTimer=setTimeout(()=>{ el.classList.remove('done'); doneTimer=null; }, 1800); }
   function requestStatus(){ if(sel.value){ statusEl.innerHTML='<div class="srow"><span class="repo">cargando estado...</span></div>'; vscode.postMessage({cmd:'status', project:sel.value}); } }
 
   function fileClass(code){
@@ -1029,15 +1057,16 @@ function getHtml() {
   sel.addEventListener('change', ()=>{ if(!sel.value) return; requestStatus(); vscode.postMessage({cmd:'select', project:sel.value}); });
   $('branchsel').addEventListener('change', ()=>{ const b=$('branchsel').value; if(!sel.value||!b)return; clearScreen(); vscode.postMessage({cmd:'switch', project:sel.value, branch:b}); });
   $('newbranch').addEventListener('click', ()=>{ if(!sel.value)return; vscode.postMessage({cmd:'newbranch', project:sel.value}); });
-  $('check').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'check', project:sel.value}); });
-  $('pull').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'pull', project:sel.value}); });
+  $('check').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('check'); vscode.postMessage({cmd:'check', project:sel.value}); });
+  $('pull').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('pull'); vscode.postMessage({cmd:'pull', project:sel.value}); });
   msg.addEventListener('input', autogrow);
-  $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; autogrow(); });
-  $('push').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); vscode.postMessage({cmd:'push', project:sel.value}); });
+  $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); lastAction=$('commit'); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; autogrow(); });
+  $('push').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('push'); vscode.postMessage({cmd:'push', project:sel.value}); });
   $('suggest').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value}); });
   $('cancel').addEventListener('click', ()=>{ line('Cancelando…','warn'); vscode.postMessage({cmd:'cancel'}); });
-  $('rescan').addEventListener('click', ()=>vscode.postMessage({cmd:'rescan'}));
-  $('refresh').addEventListener('click', requestStatus);
+  function spin(el){ if(!el)return; el.classList.remove('spin'); void el.offsetWidth; el.classList.add('spin'); }
+  $('rescan').addEventListener('click', ()=>{ spin($('rescan')); vscode.postMessage({cmd:'rescan'}); });
+  $('refresh').addEventListener('click', ()=>{ spin($('refresh')); requestStatus(); });
   $('popout').addEventListener('click', ()=>vscode.postMessage({cmd:'popout'}));
 
   window.addEventListener('message', ev=>{
@@ -1054,8 +1083,8 @@ function getHtml() {
     } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint);
     } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
     } else if(m.type==='busy'){ setBusy(true);
-    } else if(m.type==='done'){ setBusy(false);
-    } else if(m.type==='log'){ line(m.text, m.level); }
+    } else if(m.type==='done'){ setBusy(false); markDone();
+    } else if(m.type==='log'){ if(m.level==='err') opHadError=true; line(m.text, m.level); }
   });
 
   vscode.postMessage({cmd:'ready'});
