@@ -730,6 +730,7 @@ function getHtml() {
   let fontCss = '';
   try { fontCss = fs.readFileSync(path.join(__dirname, 'media', 'fonts.css'), 'utf8'); } catch (e) {}
   try { fontCss += '\n' + fs.readFileSync(path.join(__dirname, 'media', 'mascot.css'), 'utf8'); } catch (e) {}
+  try { fontCss += '\n' + fs.readFileSync(path.join(__dirname, 'media', 'background.css'), 'utf8'); } catch (e) {}
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -759,10 +760,18 @@ function getHtml() {
     margin:0; padding:14px; color:var(--txt); font-family:var(--sans); font-size:13px; letter-spacing:.01em; overflow-x:hidden;
     background:radial-gradient(120% 80% at 50% -5%, #43301c 0%, rgba(67,48,28,0) 55%), var(--bg2);
   }
+  /* foto del cafe muy sutil de fondo, con velo calido para no restar legibilidad */
+  body::before {
+    content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
+    background:
+      linear-gradient(180deg, rgba(32,22,13,.82), rgba(20,14,9,.90)),
+      var(--bgimg) center/cover no-repeat;
+    filter:saturate(.9);
+  }
 
   .panel {
     position:relative; border-radius:18px; padding:18px; display:flex; flex-direction:column; gap:13px;
-    background:linear-gradient(160deg,var(--bg1),var(--bg2)); border:1px solid var(--bd1);
+    background:linear-gradient(160deg, rgba(47,32,21,.90), rgba(32,22,13,.93)); backdrop-filter:blur(3px); border:1px solid var(--bd1);
     box-shadow:0 0 0 1px var(--bd1), 0 12px 34px -10px rgba(0,0,0,.75), 0 0 24px -4px rgba(224,145,47,.5), 0 0 64px -14px rgba(224,145,47,.35);
   }
 
