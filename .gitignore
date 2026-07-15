@@ -9,6 +9,10 @@ media/*.zip
 # extension empaquetada (usar Releases de GitHub, no versionar el binario)
 *.vsix
 
+# notas internas / material de trabajo (no distribuir)
+Apuntes*.txt
+*.zip
+
 # sistema
 Thumbs.db
 .DS_Store
