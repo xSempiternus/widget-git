@@ -2,8 +2,27 @@
   "name": "git-arcade",
   "displayName": "Brew",
   "description": "Brew: panel de git tipo cafeteria (check/pull/commit/push, rama, estado) para cualquier proyecto detectado.",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "publisher": "nikolas",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xSempiternus/git-arcade.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xSempiternus/git-arcade/issues"
+  },
+  "homepage": "https://github.com/xSempiternus/git-arcade#readme",
+  "keywords": [
+    "git",
+    "scm",
+    "commit",
+    "push",
+    "pull",
+    "branch",
+    "cafe",
+    "brew"
+  ],
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -46,6 +65,14 @@
       {
         "command": "gitArcade.popout",
         "title": "GIT ARCADE: Abrir en ventana flotante"
+      },
+      {
+        "command": "gitArcade.setBackground",
+        "title": "GIT ARCADE: Cambiar fondo del panel"
+      },
+      {
+        "command": "gitArcade.clearBackground",
+        "title": "GIT ARCADE: Restaurar fondo por defecto"
       }
     ],
     "configuration": {
@@ -71,6 +98,18 @@
           "type": "string",
           "default": "",
           "description": "Rama a integrar. Vacio = detectar automaticamente (origin/HEAD, si no main)."
+        },
+        "gitArcade.backgroundImage": {
+          "type": "string",
+          "default": "",
+          "description": "Ruta a una imagen personalizada para el fondo del panel. Vacio = usar el fondo por defecto (cafeteria). Se puede cambiar tambien desde el icono de imagen en el panel."
+        },
+        "gitArcade.backgroundOpacity": {
+          "type": "number",
+          "default": 0.14,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Intensidad de la imagen de fondo (0 = oculta, 1 = plena). Por defecto muy sutil para no restar legibilidad."
         }
       }
     }
