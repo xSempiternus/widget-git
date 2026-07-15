@@ -144,8 +144,8 @@ function imageDataUri(file) {
 }
 // intensidad de la imagen (0 = oculta, 1 = plena). Por defecto sutil.
 function bgOpacity() {
-  let p = Number(cfg('backgroundOpacity', 0.14));
-  if (!isFinite(p)) p = 0.14;
+  let p = Number(cfg('backgroundOpacity', 0.10));
+  if (!isFinite(p)) p = 0.10;
   return Math.max(0, Math.min(1, p));
 }
 // a mayor visibilidad, menor velo oscuro encima.
@@ -161,12 +161,15 @@ function sendBackground() { post({ type: 'background', uri: currentBgUri(), opac
 
 // Flujo para cambiar el fondo: elegir imagen o restaurar la de por defecto.
 async function setBackgroundFlow() {
+  const pct = Math.round(bgOpacity() * 100);
   const pick = await vscode.window.showQuickPick(
     [ { label: '$(file-media)  Elegir imagen...', id: 'choose' },
+      { label: '$(color-mode)  Ajustar intensidad...', id: 'opacity', description: `actual: ${pct}%` },
       { label: '$(discard)  Restaurar fondo por defecto', id: 'reset' } ],
     { placeHolder: 'Fondo del panel Brew' });
   if (!pick) return;
   const conf = vscode.workspace.getConfiguration('gitArcade');
+  if (pick.id === 'opacity') { await adjustOpacityFlow(); return; }
   if (pick.id === 'reset') { await conf.update('backgroundImage', '', vscode.ConfigurationTarget.Global); sendBackground(); return; }
   const uris = await vscode.window.showOpenDialog({
     canSelectMany: false, openLabel: 'Usar como fondo',
@@ -188,6 +191,35 @@ async function setBackgroundFlow() {
 async function clearBackgroundFlow() {
   await vscode.workspace.getConfiguration('gitArcade').update('backgroundImage', '', vscode.ConfigurationTarget.Global);
   sendBackground();
+}
+
+// Ajusta la intensidad/transparencia del fondo con vista previa EN VIVO:
+// al recorrer los niveles el panel cambia al instante; Enter guarda, Esc revierte.
+function adjustOpacityFlow() {
+  const conf = vscode.workspace.getConfiguration('gitArcade');
+  const cur = bgOpacity();
+  const levels = [
+    { label: 'Apagado (solo color)', v: 0 },
+    { label: 'Muy sutil',            v: 0.08 },
+    { label: 'Sutil (recomendado)',  v: 0.14 },
+    { label: 'Media',                v: 0.25 },
+    { label: 'Visible',              v: 0.40 },
+  ];
+  const uri = currentBgUri();  // se codifica una vez y se reutiliza en cada preview
+  const qp = vscode.window.createQuickPick();
+  qp.title = 'Intensidad del fondo';
+  qp.placeholder = 'Vista previa en vivo — Enter para guardar, Esc para cancelar';
+  qp.items = levels.map(l => ({ label: (Math.abs(l.v - cur) < 0.001 ? '$(check) ' : '') + l.label, description: Math.round(l.v * 100) + '%', v: l.v }));
+  const active = qp.items.filter(i => Math.abs(i.v - cur) < 0.001);
+  if (active.length) qp.activeItems = active;
+  let chosen = cur;
+  qp.onDidChangeActive(items => { if (items && items[0]) { chosen = items[0].v; post({ type: 'background', uri, opacity: chosen }); } });
+  return new Promise(resolve => {
+    let saved = false;
+    qp.onDidAccept(async () => { saved = true; await conf.update('backgroundOpacity', chosen, vscode.ConfigurationTarget.Global); qp.hide(); });
+    qp.onDidHide(() => { qp.dispose(); if (!saved) sendBackground(); resolve(); });  // Esc: revierte al valor guardado
+    qp.show();
+  });
 }
 
 function getProjects() {

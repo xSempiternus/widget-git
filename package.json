@@ -106,10 +106,10 @@
         },
         "gitArcade.backgroundOpacity": {
           "type": "number",
-          "default": 0.14,
+          "default": 0.10,
           "minimum": 0,
           "maximum": 1,
-          "description": "Intensidad de la imagen de fondo (0 = oculta, 1 = plena). Por defecto muy sutil para no restar legibilidad."
+          "description": "Intensidad de la imagen de fondo (0 = oculta, 1 = plena). Ajustable tambien desde el icono de imagen del panel > Ajustar intensidad. Por defecto muy sutil para no restar legibilidad."
         }
       }
     }

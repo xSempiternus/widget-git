@@ -19,9 +19,10 @@ Panel de git tipo cafetería para VS Code: **Check / Pull / Commit / Push**, cam
 
 El panel trae un fondo de cafetería muy sutil, y **puedes ponerle cualquier imagen**:
 
-- Clic en el **icono de imagen** (arriba a la derecha del panel) → *Elegir imagen…* o *Restaurar fondo por defecto*.
+- Clic en el **icono de imagen** (arriba a la derecha del panel) → *Elegir imagen…*, *Ajustar intensidad…* o *Restaurar fondo por defecto*.
+- *Ajustar intensidad* muestra niveles (Apagado → Visible) con **vista previa en vivo**: se ve el cambio al instante y Enter lo guarda.
 - O desde la paleta: *GIT ARCADE: Cambiar fondo del panel* / *Restaurar fondo por defecto*.
-- Ajusta la intensidad con `gitArcade.backgroundOpacity` (`0` = oculta, `1` = plena; default `0.14`, muy sutil).
+- También por config: `gitArcade.backgroundOpacity` (`0` = oculta, `1` = plena; default `0.10`, muy sutil).
 
 El fondo se aplica **en caliente** (sin recargar) y es responsive (escala a cubrir el panel). Las imágenes se embeben para que el webview pueda mostrarlas; si eliges una muy grande (>6 MB) se te avisa.
 
@@ -49,7 +50,7 @@ Es una **vista fijable**: arrástrala a la barra lateral secundaria o al panel i
 | `gitArcade.scanDepth` | Profundidad máxima (default 4). |
 | `gitArcade.mainBranch` | Fuerza una rama; vacío = auto (origin/HEAD → main → master). |
 | `gitArcade.backgroundImage` | Ruta a una imagen de fondo personalizada; vacío = fondo por defecto. |
-| `gitArcade.backgroundOpacity` | Intensidad del fondo (0–1, default 0.14). |
+| `gitArcade.backgroundOpacity` | Intensidad del fondo (0–1, default 0.10). Ajustable en vivo desde el panel. |
 
 Tras crear un proyecto nuevo: *GIT ARCADE: Re-escanear proyectos* (o el icono de escanear del panel).
 

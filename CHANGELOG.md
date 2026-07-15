@@ -11,6 +11,8 @@ y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
   (icono de imagen en la cabecera o comando *GIT ARCADE: Cambiar fondo del panel*).
 - Ajuste `gitArcade.backgroundImage` (ruta) y `gitArcade.backgroundOpacity` (0–1) para
   controlar imagen e intensidad. El fondo se aplica en caliente, sin recargar.
+- **Ajustar intensidad** desde el mismo botón de cambiar fondo, con **vista previa en vivo**
+  (niveles Apagado → Visible). Default más sutil (0.10).
 - Fondo de cafetería por defecto, muy sutil, con velo cálido para no restar legibilidad.
 - Iconos de **actualizar estado** y **re-escanear** en la cabecera.
 - Estado **hecho** (verde con ✓) en cada botón al completar su acción.
