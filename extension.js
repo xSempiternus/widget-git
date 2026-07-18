@@ -202,7 +202,27 @@ function findProject(name) { return getProjects().find(p => p.name === name); }
 //  Sincronizacion con VSCode (extension <-> editor / terminal)
 // ---------------------------------------------------------------------------
 // Fuerza el refresco de la vista de git nativa (indicador de rama, SCM).
+// Usamos la API de la extension Git (refresca cada repo por su cuenta) en vez del
+// comando global `git.refresh`, que en workspaces con varios repos abre el
+// molesto selector "Choose a repository". Fallback al comando si la API no esta.
+let _gitApi = null;
+function getGitApi() {
+  if (_gitApi) return _gitApi;
+  try {
+    const ext = vscode.extensions.getExtension('vscode.git');
+    if (ext && ext.isActive && ext.exports && ext.exports.getAPI) _gitApi = ext.exports.getAPI(1);
+  } catch (e) {}
+  return _gitApi;
+}
 function refreshVscodeGit() {
+  const api = getGitApi();
+  if (api && Array.isArray(api.repositories) && api.repositories.length) {
+    let done = false;
+    for (const r of api.repositories) {
+      try { if (typeof r.status === 'function') { r.status(); done = true; } } catch (e) {}
+    }
+    if (done) return;   // refrescamos cada repo sin abrir ningun selector
+  }
   try { vscode.commands.executeCommand('git.refresh'); } catch (e) {}
 }
 
@@ -327,7 +347,28 @@ async function readRepo(repo) {
   const remoteHasBranch = hasRemote && branch && branch !== '(detached)' &&
     (await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).code === 0;
 
-  return { name: repo.name, branch, ahead, behind, dirty: fileLines.length, hasUp, hasRemote, remoteHasBranch, remoteUrl: rem.out || '', files, branches };
+  // --- Relacion con la rama principal (el concepto clave de los apuntes) ---
+  // Una rama es solo una etiqueta que apunta a un commit. "ahead N" compara la
+  // rama local con SU pareja remota (origin/rama), no mide trabajo tuyo. Para
+  // saber si esos commits son de verdad tuyos, los comparamos contra main.
+  const main = await defaultBranch(repo.path);
+  const onMain = branch === main;
+  let mainExists = false;     // origin/main existe localmente (foto del ultimo fetch)?
+  let uniqueVsMain = 0;       // commits en HEAD que NO estan en origin/main (= trabajo propio real)
+  let mergedInMain = false;   // HEAD ya esta contenido en origin/main (rama ya fusionada)
+  let phantomAhead = false;   // ahead>0 pero esos commits YA viven en main -> hueco fantasma
+  if (hasRemote && branch && branch !== '(detached)') {
+    mainExists = (await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${main}`])).code === 0;
+    if (mainExists && !onMain) {
+      uniqueVsMain = parseInt((await git(repo.path, ['rev-list', '--count', `origin/${main}..HEAD`])).out || '0', 10) || 0;
+      mergedInMain = (await git(repo.path, ['merge-base', '--is-ancestor', 'HEAD', `origin/${main}`])).code === 0;
+      // ahead sobre origin/rama pero sin nada propio frente a main = etiqueta vieja apuntando atras
+      phantomAhead = ahead > 0 && uniqueVsMain === 0;
+    }
+  }
+
+  return { name: repo.name, branch, ahead, behind, dirty: fileLines.length, hasUp, hasRemote, remoteHasBranch,
+    remoteUrl: rem.out || '', files, branches, main, onMain, mainExists, uniqueVsMain, mergedInMain, phantomAhead };
 }
 
 async function sendStatus(projectName) {
@@ -335,28 +376,47 @@ async function sendStatus(projectName) {
   if (!proj) return;
   if (currentProject !== projectName) { currentProject = projectName; armHeadWatchers(proj); }
   const results = await Promise.all(proj.repos.map(readRepo));
-  const repos = results.map(r => ({ name: r.name, branch: r.branch, ahead: r.ahead, behind: r.behind, dirty: r.dirty, hasUp: r.hasUp, hasRemote: r.hasRemote, files: r.files }));
+  const repos = results.map(r => ({ name: r.name, branch: r.branch, ahead: r.ahead, behind: r.behind, dirty: r.dirty,
+    hasUp: r.hasUp, hasRemote: r.hasRemote, files: r.files, onMain: r.onMain, mergedInMain: r.mergedInMain, phantomAhead: r.phantomAhead }));
   // union de ramas conservando el orden por actividad reciente
   const seen = new Set(); const branches = [];
   for (const r of results) for (const b of r.branches) { if (!seen.has(b)) { seen.add(b); branches.push(b); } }
   const currents = new Set(results.map(r => r.branch));
   const current = currents.size === 1 ? Array.from(currents)[0] : '';
-  post({ type: 'status', project: projectName, repos, branches, current, hint: assistantHint(proj.name, results) });
+  // rama principal comun (para el boton "Ir a main"); si difieren entre repos, la mas frecuente
+  const mainCount = {};
+  for (const r of results) if (r.main) mainCount[r.main] = (mainCount[r.main] || 0) + 1;
+  const mainBranch = Object.keys(mainCount).sort((a, b) => mainCount[b] - mainCount[a])[0] || '';
+  post({ type: 'status', project: projectName, repos, branches, current, mainBranch, hint: assistantHint(proj.name, results) });
 }
 
 // Mensaje proactivo de la mascota-asistente segun el estado agregado.
+// El orden importa: los casos "trampa" (donde Push seria un error) van PRIMERO.
 function assistantHint(projName, results) {
   const noRemote = results.filter(r => !r.hasRemote);
   const dirty = results.reduce((s, r) => s + r.dirty, 0);
-  const ahead = results.reduce((s, r) => s + r.ahead, 0);
   const behind = results.reduce((s, r) => s + r.behind, 0);
   const noUp = results.filter(r => r.hasRemote && !r.hasUp);
+
   if (noRemote.length) {
     const n = noRemote.map(r => r.name).join(', ');
     return `&#9888; ${n} no est&aacute; conectado a un remoto. Con&eacute;ctalo: <span class="mono">git remote add origin &lt;url&gt;</span> y luego Push.`;
   }
   if (dirty > 0) return `Tienes <b>${dirty} cambio(s) sin commitear</b> &#9749; &mdash; escribe un mensaje (o dale &#10024;) y Commit.`;
-  if (ahead > 0) return `Tienes <b>${ahead} commit(s) sin pushear</b> &#8593; &mdash; dale <b>Push</b> para subirlos.`;
+
+  // CASO TRAMPA (apuntes de flujo): estas parado en una rama con "ahead N" pero esos
+  // commits YA viven en main en el servidor. Es una etiqueta vieja apuntando atras,
+  // no trabajo tuyo pendiente. Push aqui reviviria una rama muerta -> mejor ir a main.
+  const phantom = results.filter(r => r.phantomAhead);
+  if (phantom.length) {
+    const r = phantom[0];
+    return `Est&aacute;s en <b>${r.branch}</b> con <b>${r.ahead} &laquo;commit(s) sin pushear&raquo;</b>, pero esos commits <b>ya est&aacute;n en el servidor dentro de <span class="mono">${r.main}</span></b>. &laquo;ahead&raquo; compara punteros, no mide tu trabajo: es una etiqueta vieja apuntando atr&aacute;s. <b>No hagas Push.</b> Dale <b>&#8962; Ir a ${r.main}</b>.`;
+  }
+
+  // ahead REAL: hay commits tuyos que main todavia no tiene -> Push si tiene sentido.
+  const realAhead = results.reduce((s, r) => s + ((r.phantomAhead) ? 0 : r.ahead), 0);
+  if (realAhead > 0) return `Tienes <b>${realAhead} commit(s) sin pushear</b> &#8593; &mdash; dale <b>Push</b> para subirlos.`;
+
   // rama sin upstream que YA existe en el remoto: no es "publicar", es "enlazar"
   const linkNeeded = noUp.filter(r => r.remoteHasBranch);
   if (linkNeeded.length) {
@@ -365,6 +425,13 @@ function assistantHint(projName, results) {
   }
   if (noUp.length) return `Tu rama es <b>nueva</b> (no est&aacute; en el remoto) &#8593; &mdash; dale <b>Push</b> y la creo en GitHub.`;
   if (behind > 0) return `Hay <b>${behind} commit(s) nuevo(s)</b> en el remoto &#8595; &mdash; dale <b>Pull</b>.`;
+
+  // rama limpia y ya fusionada en main: su trabajo ya vive en main. Volver a main es higiene.
+  const merged = results.filter(r => r.mergedInMain && !r.onMain);
+  if (merged.length) {
+    const r = merged[0];
+    return `<b>${r.branch}</b> ya est&aacute; <b>fusionada en <span class="mono">${r.main}</span></b>: su trabajo ya vive ah&iacute;. Puedes volver con <b>&#8962; Ir a ${r.main}</b> sin perder nada.`;
+  }
   return `Todo al d&iacute;a &#10024; &iquest;un cafecito? &#9749;`;
 }
 
@@ -410,6 +477,17 @@ async function runMain(kind, projectName) {
       if (branch !== main) {
         const bm = parseInt((await git(repo.path, ['rev-list', '--count', `HEAD..origin/${main}`])).out || '0', 10) || 0;
         if (bm > 0) post({ type: 'log', level: 'dim', text: `   (${main} va ${bm} commit(s) adelante)` });
+        // hueco fantasma: ahead sobre origin/rama pero sin nada propio frente a main
+        const originHasBranch = (await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${branch}`])).code === 0;
+        const mainExists = (await git(repo.path, ['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${main}`])).code === 0;
+        if (originHasBranch && mainExists) {
+          const aheadOwn = parseInt((await git(repo.path, ['rev-list', '--count', `origin/${branch}..HEAD`])).out || '0', 10) || 0;
+          const uniqueVsMain = parseInt((await git(repo.path, ['rev-list', '--count', `origin/${main}..HEAD`])).out || '0', 10) || 0;
+          if (aheadOwn > 0 && uniqueVsMain === 0) {
+            post({ type: 'log', level: 'warn', text: `   ${tag}: "ahead ${aheadOwn}" es un hueco fantasma -> esos commits ya estan en origin/${main}` });
+            post({ type: 'log', level: 'dim', text: `   No pushees esta rama; cambia a ${main} (Ir a ${main}).` });
+          }
+        }
       }
     } else {
       // PULL de TU rama actual desde el remoto (no de main)
@@ -830,6 +908,8 @@ function getHtml() {
   .b-up{ color:#f0d8a0; background:rgba(224,145,47,.14); border:1px solid rgba(224,145,47,.4);}
   .b-dn{ color:#e6b48a; background:rgba(207,107,66,.16); border:1px solid rgba(207,107,66,.45);}
   .b-noremote{ color:#f0a882; background:rgba(207,107,66,.18); border:1px solid rgba(207,107,66,.6);}
+  .b-phantom{ color:#cbb892; background:rgba(143,118,87,.18); border:1px dashed rgba(185,138,82,.6);}
+  .b-merged{ color:var(--green); background:rgba(126,168,116,.12); border:1px solid rgba(126,168,116,.4);}
 
   /* fila de commit con boton sugerir */
   .commitrow { display:flex; gap:8px; align-items:flex-start; }
@@ -858,6 +938,11 @@ function getHtml() {
   .newbr { width:38px; height:38px; flex:none; border:1px solid var(--bd2); border-radius:10px; background:var(--surfA);
     color:var(--amber); font-size:20px; line-height:1; cursor:pointer; display:flex; align-items:center; justify-content:center; }
   .newbr:hover { box-shadow:0 0 10px -3px rgba(224,145,47,.7); border-color:rgba(224,145,47,.5); }
+  /* boton "volver a main": aparece solo cuando estas fuera de la rama principal */
+  .gotomain { height:38px; flex:none; padding:0 12px; border:1px solid rgba(224,145,47,.5); border-radius:10px;
+    background:var(--grad); color:#2a1503; font-family:var(--mono); font-size:12px; font-weight:700; line-height:1;
+    cursor:pointer; display:flex; align-items:center; gap:6px; box-shadow:0 0 14px -6px rgba(224,145,47,.7); }
+  .gotomain:hover { filter:brightness(1.05); box-shadow:0 0 18px -4px rgba(224,145,47,.85); }
 
   /* divisor */
   .divider { display:flex; align-items:center; gap:10px; }
@@ -951,6 +1036,7 @@ function getHtml() {
     <div class="branchbar" id="branchbar" style="display:none;">
       <span class="blabel">Rama</span>
       <select id="branchsel"></select>
+      <button class="gotomain" id="gotomain" title="Volver a la rama principal" style="display:none;">&#8962;</button>
       <button class="newbr" id="newbranch" title="Crear rama nueva">&#43;</button>
     </div>
 
@@ -1016,18 +1102,24 @@ function getHtml() {
     return 'c-mod';
   }
 
+  let mainBranch = '';        // rama principal del proyecto actual (para "Ir a main")
+
   function renderBranchBar(branches, current){
-    const bar=$('branchbar'), bsel=$('branchsel'), blab=bar.querySelector('.blabel');
+    const bar=$('branchbar'), bsel=$('branchsel'), blab=bar.querySelector('.blabel'), gm=$('gotomain');
     if(!branches || !branches.length){ bar.style.display='none'; return; }
     bar.style.display='flex';
     if(blab) blab.textContent='Rama ('+branches.length+')';
     bsel.innerHTML='';
     if(!current){ const o=document.createElement('option'); o.value=''; o.textContent='(varias ramas)'; bsel.appendChild(o); }
     branches.forEach(b=>{ const o=document.createElement('option'); o.value=b; o.textContent=b; if(b===current)o.selected=true; bsel.appendChild(o); });
+    // el boton "Ir a main" solo cuando estas seguro fuera de la rama principal
+    const show = mainBranch && current && current!==mainBranch;
+    if(gm){ gm.style.display = show ? 'flex' : 'none'; gm.title='Volver a '+mainBranch; gm.innerHTML='&#8962; '+mainBranch; }
   }
 
-  function renderStatus(p, repos, branches, current, hint){
+  function renderStatus(p, repos, branches, current, hint, mainB){
     if(sel.value!==p) return;
+    mainBranch = mainB || '';
     renderBranchBar(branches, current);
     if(hint) setHint(hint);
     statusEl.innerHTML='';
@@ -1037,15 +1129,17 @@ function getHtml() {
       if(r.hasRemote===false) state='st-warn';
       else if(r.dirty>0) state='st-dirty';
       else if(r.behind>0) state='st-warn';
-      else if(r.ahead>0) state='st-ahead';
+      else if(r.ahead>0 && !r.phantomAhead) state='st-ahead';
       const row=document.createElement('div'); row.className='srow '+state+(hasFiles?' has':'');
       const multi = repos.length>1 ? '<span class="repo">'+r.name+'</span>' : '';
       const caret = hasFiles ? '<span class="caret">&#9656;</span>' : '';
       let badges='';
       if(r.dirty>0) badges+='<span class="badge state b-dirty">'+r.dirty+' cambio'+(r.dirty>1?'s':'')+'</span>';
       else badges+='<span class="badge state b-clean">&#10003; limpio</span>';
-      if(r.ahead>0) badges+=' <span class="badge b-up">&#8593;'+r.ahead+'</span>';
+      if(r.phantomAhead) badges+=' <span class="badge b-phantom" title="Estos commits ya viven en main en el servidor; no necesitas Push">&#8593;'+r.ahead+' ya en main</span>';
+      else if(r.ahead>0) badges+=' <span class="badge b-up">&#8593;'+r.ahead+'</span>';
       if(r.behind>0) badges+=' <span class="badge b-dn">&#8595;'+r.behind+'</span>';
+      if(r.mergedInMain && !r.onMain && r.dirty===0 && !r.phantomAhead && r.ahead===0) badges+=' <span class="badge b-merged" title="Su trabajo ya vive en main">fusionada</span>';
       if(r.hasRemote===false) badges+=' <span class="badge b-noremote">sin remoto</span>';
       row.innerHTML='<span class="br"><span class="dot"></span><span class="ico">&#9095;</span>'+r.branch+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
       statusEl.appendChild(row);
@@ -1065,6 +1159,7 @@ function getHtml() {
 
   sel.addEventListener('change', ()=>{ if(!sel.value) return; requestStatus(); vscode.postMessage({cmd:'select', project:sel.value}); });
   $('branchsel').addEventListener('change', ()=>{ const b=$('branchsel').value; if(!sel.value||!b)return; clearScreen(); vscode.postMessage({cmd:'switch', project:sel.value, branch:b}); });
+  $('gotomain').addEventListener('click', ()=>{ if(!sel.value||!mainBranch)return; clearScreen(); vscode.postMessage({cmd:'switch', project:sel.value, branch:mainBranch}); });
   $('newbranch').addEventListener('click', ()=>{ if(!sel.value)return; vscode.postMessage({cmd:'newbranch', project:sel.value}); });
   $('check').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('check'); vscode.postMessage({cmd:'check', project:sel.value}); });
   $('pull').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('pull'); vscode.postMessage({cmd:'pull', project:sel.value}); });
@@ -1089,7 +1184,7 @@ function getHtml() {
       if(prev && projects.some(p=>p.name===prev)) sel.value=prev;
       requestStatus();
     } else if(m.type==='select'){ if(m.project && projects.some(p=>p.name===m.project) && sel.value!==m.project){ sel.value=m.project; requestStatus(); }
-    } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint);
+    } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint, m.mainBranch);
     } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
     } else if(m.type==='busy'){ setBusy(true);
     } else if(m.type==='done'){ setBusy(false); markDone();

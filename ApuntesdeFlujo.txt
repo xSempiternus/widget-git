@@ -1,0 +1,57 @@
+Apuntes del flujo, para mejorar la extension.
+* No se entiende mucho el flujo.Hice open folder de un repositorio(fidelya en este caso) y habian bastantes cambios en ciertas ramas. 
+Abri la extension y no se entiendo mucho lo que hay que hacer ya que al hacer check main, se me abre en el buscador de vscode "choose repository" a cada rato. Nose en que rama estoy parado
+, nose el estado en el que esta esa rama.
+## Caso: "Tengo N commits sin pushear" en una rama que yo no toqué
+
+  ### Síntoma
+  Estás parado en una rama (ej. `flyio-new-files`) y git/el editor avisa:
+  "272 commits sin pushear" (ahead 272). Tú no hiciste esos cambios.
+
+  ### Por qué pasa (el concepto clave)
+  - Una rama en git NO es una carpeta de "tus cambios": es solo una **etiqueta
+    (puntero) que apunta a un commit**.
+  - "ahead N" NO significa "hiciste N commits". Significa: *"la rama local tiene
+    N commits que su pareja remota (origin/rama) todavía no tiene."* Es una
+    **comparación entre dos punteros**, no una lista de trabajo tuyo.
+  - Un commit, una vez creado, vive en la historia y cualquier rama que lo
+    incluya lo "arrastra", sin importar quién lo escribió.
+
+  ### Cómo se llega a esta situación (ejemplo Fly.io)
+  1. `fly launch` crea un commit ("New files from Fly.io Launch") ENCIMA de main
+     y le cuelga una etiqueta/rama `flyio-new-files`, que sube al remoto.
+  2. El equipo sigue trabajando en main → main crece 272 commits (de varios
+     autores, no solo tú).
+  3. Tu rama local `flyio-new-files` termina apuntando al mismo commit que main
+     (avanzada), pero la etiqueta REMOTA `origin/flyio-new-files` quedó
+     congelada en el commit del día 1.
+  4. Git compara local vs remota de esa rama → hueco de 272 → "ahead 272".
+
+  ### Cómo lo "sabe" git sin internet
+  Git guarda una foto de cómo estaba el servidor en el último `fetch`/`pull`:
+  las **ramas de rastreo remoto** (`origin/main`, `origin/flyio-new-files`...).
+  El "ahead/behind" se calcula LOCAL comparando:
+    rama local  ⟷  última foto de su rama remota.
+  No son archivos modificados ni cambios sin guardar.
+
+  ### Verificaciones útiles (comandos)
+  - Contar diferencia real:   `git rev-list --count origin/rama..HEAD`
+  - Ver autores del hueco:    `git log --format="%an" origin/rama..HEAD | sort | uniq -c | sort -rn`
+  - ¿Ya está fusionada?:      `git merge-base --is-ancestor origin/rama origin/main && echo MERGED`
+  - Único de la rama vs main: `git rev-list --count origin/main..origin/rama`  (0 = nada propio)
+
+  ### Solución recomendada
+  - Si es una rama de bot/ajena y solo estás "parado" ahí:
+    → NO pushear ese hueco (esos commits ya están en origin/main).
+    → Simplemente cambiar a main:   `git switch main`
+      (esto NO borra ni modifica ninguna rama; solo mueve dónde estás parado).
+
+  ### Sobre ramas viejas ya fusionadas (ej. features del equipo)
+  - Si tienen 0 commits únicos vs main → su trabajo YA está en main y operativo.
+  - Borrarlas es solo higiene, nunca recuperación. No urge.
+  - No borrar ramas remotas ajenas por cuenta propia; es decisión del equipo.
+
+  ### Regla mental para recordar
+  Las ramas son etiquetas móviles. "ahead/behind" compara punteros, no mide tu
+  trabajo. Un feature fusionado deja su rama vieja apuntando atrás, aunque su
+  código ya viva en main.
