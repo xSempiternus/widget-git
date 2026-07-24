@@ -48,9 +48,18 @@ function activate(context) {
   context.subscriptions.push(
     vscode.commands.registerCommand('gitArcade.open', () => vscode.commands.executeCommand('gitArcadeView.focus')),
     vscode.commands.registerCommand('gitArcade.popout', openPopout),
+    vscode.commands.registerCommand('gitArcade.setBackground', setBackgroundFlow),
+    vscode.commands.registerCommand('gitArcade.clearBackground', clearBackgroundFlow),
     vscode.commands.registerCommand('gitArcade.rescan', () => {
       invalidateCache(); sendProjects();
       vscode.window.showInformationMessage('GIT ARCADE: proyectos re-escaneados.');
+    })
+  );
+
+  // si cambia la config del fondo (desde Ajustes), refresca los webviews en caliente
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration(e => {
+      if (e.affectsConfiguration('gitArcade.backgroundImage') || e.affectsConfiguration('gitArcade.backgroundOpacity')) sendBackground();
     })
   );
 
@@ -95,8 +104,12 @@ async function onMessage(msg) {
     if (['check', 'pull', 'commit', 'push', 'switch', 'newbranch', 'suggest'].includes(msg.cmd)) opCancelled = false;
     if (msg.cmd === 'switch' || msg.cmd === 'newbranch') suppressWatchUntil = Date.now() + 2500;
     switch (msg.cmd) {
-      case 'ready': sendProjects(); autoSelect(); break;
+      case 'ready': sendProjects(); autoSelect(); sendBackground(); break;
       case 'rescan': invalidateCache(); sendProjects(); autoSelect(); break;
+      case 'setbg': await setBackgroundFlow(); break;
+      case 'bgImage': await pickBackgroundImage(); break;
+      case 'bgReset': await clearBackgroundFlow(); break;
+      case 'bgOpacity': await setBackgroundOpacity(msg.value); break;
       case 'status': await sendStatus(msg.project); break;
       case 'select': await selectProject(msg.project); break;
       case 'check': await runMain('check', msg.project, msg.repos); break;
@@ -117,6 +130,115 @@ async function onMessage(msg) {
 }
 
 function post(m) { for (const wv of targets) wv.postMessage(m); }
+
+// ---------------------------------------------------------------------------
+//  Fondo del panel (imagen por defecto o personalizada + intensidad), en config
+// ---------------------------------------------------------------------------
+// El webview no puede leer rutas arbitrarias del disco: embebemos la imagen como
+// data-URI base64. Devuelve '' si falla (CSP permite img-src data:).
+function imageDataUri(file) {
+  try {
+    const buf = fs.readFileSync(file);
+    const ext = path.extname(file).toLowerCase();
+    const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif'
+      : ext === '.webp' ? 'image/webp' : ext === '.bmp' ? 'image/bmp'
+      : ext === '.svg' ? 'image/svg+xml' : 'image/jpeg';
+    return `data:${mime};base64,${buf.toString('base64')}`;
+  } catch (e) { return ''; }
+}
+// intensidad de la imagen (0 = oculta, 1 = plena). Por defecto sutil.
+function bgOpacity() {
+  let p = Number(cfg('backgroundOpacity', 0.10));
+  if (!isFinite(p)) p = 0.10;
+  return Math.max(0, Math.min(1, p));
+}
+// a mayor visibilidad de la imagen, menor velo oscuro encima.
+function veilFor(p) { return Math.max(0.3, Math.min(0.97, 1 - p)).toFixed(3); }
+// imagen vigente: la personalizada si existe y es valida; si no, la de por defecto.
+function currentBgUri() {
+  const custom = cfg('backgroundImage', '');
+  if (custom) { const u = imageDataUri(custom); if (u) return u; }
+  return imageDataUri(path.join(__dirname, 'media', 'background.jpg'));
+}
+// empuja el fondo vigente a todos los webviews vivos (en caliente, sin recargar).
+function sendBackground() { post({ type: 'background', uri: currentBgUri(), opacity: bgOpacity() }); }
+
+// Menu (paleta de comandos / icono): elegir imagen, ajustar intensidad o restaurar.
+async function setBackgroundFlow() {
+  const pct = Math.round(bgOpacity() * 100);
+  const pick = await vscode.window.showQuickPick(
+    [ { label: '$(file-media)  Elegir imagen...', id: 'choose' },
+      { label: '$(color-mode)  Ajustar intensidad...', id: 'opacity', description: `actual: ${pct}%` },
+      { label: '$(discard)  Restaurar fondo por defecto', id: 'reset' } ],
+    { placeHolder: 'Fondo del panel Brew' });
+  if (!pick) return;
+  if (pick.id === 'opacity') { await adjustOpacityFlow(); return; }
+  if (pick.id === 'reset') { await clearBackgroundFlow(); return; }
+  await pickBackgroundImage();
+}
+
+// Abre el selector de archivos y fija la imagen elegida como fondo (via config).
+async function pickBackgroundImage() {
+  const uris = await vscode.window.showOpenDialog({
+    canSelectMany: false, openLabel: 'Usar como fondo',
+    filters: { 'Imagenes': ['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'] }
+  });
+  if (!uris || !uris.length) return;
+  const fsPath = uris[0].fsPath;
+  try {
+    const size = fs.statSync(fsPath).size;
+    if (size > 6 * 1024 * 1024) {
+      const go = await vscode.window.showWarningMessage(
+        `La imagen pesa ${(size / 1048576).toFixed(1)} MB y puede ralentizar el panel. Usarla igual?`, 'Si', 'No');
+      if (go !== 'Si') return;
+    }
+  } catch (e) {}
+  await vscode.workspace.getConfiguration('gitArcade').update('backgroundImage', fsPath, vscode.ConfigurationTarget.Global);
+  sendBackground();
+}
+
+async function clearBackgroundFlow() {
+  const conf = vscode.workspace.getConfiguration('gitArcade');
+  await conf.update('backgroundImage', '', vscode.ConfigurationTarget.Global);
+  await conf.update('backgroundOpacity', 0.10, vscode.ConfigurationTarget.Global);
+  sendBackground();
+}
+
+// Guarda la intensidad (desde el slider del panel). Se persiste en config.
+async function setBackgroundOpacity(value) {
+  let v = Number(value); if (!isFinite(v)) return;
+  v = Math.max(0, Math.min(1, v));
+  await vscode.workspace.getConfiguration('gitArcade').update('backgroundOpacity', v, vscode.ConfigurationTarget.Global);
+  sendBackground();
+}
+
+// Ajusta la intensidad con vista previa EN VIVO (paleta): recorrer = preview, Enter guarda, Esc revierte.
+function adjustOpacityFlow() {
+  const conf = vscode.workspace.getConfiguration('gitArcade');
+  const cur = bgOpacity();
+  const levels = [
+    { label: 'Apagado (solo color)', v: 0 },
+    { label: 'Muy sutil',            v: 0.08 },
+    { label: 'Sutil (recomendado)',  v: 0.14 },
+    { label: 'Media',                v: 0.25 },
+    { label: 'Visible',              v: 0.40 },
+  ];
+  const uri = currentBgUri();  // se codifica una vez y se reutiliza en cada preview
+  const qp = vscode.window.createQuickPick();
+  qp.title = 'Intensidad del fondo';
+  qp.placeholder = 'Vista previa en vivo — Enter para guardar, Esc para cancelar';
+  qp.items = levels.map(l => ({ label: (Math.abs(l.v - cur) < 0.001 ? '$(check) ' : '') + l.label, description: Math.round(l.v * 100) + '%', v: l.v }));
+  const active = qp.items.filter(i => Math.abs(i.v - cur) < 0.001);
+  if (active.length) qp.activeItems = active;
+  let chosen = cur;
+  qp.onDidChangeActive(items => { if (items && items[0]) { chosen = items[0].v; post({ type: 'background', uri, opacity: chosen }); } });
+  return new Promise(resolve => {
+    let saved = false;
+    qp.onDidAccept(async () => { saved = true; await conf.update('backgroundOpacity', chosen, vscode.ConfigurationTarget.Global); qp.hide(); });
+    qp.onDidHide(() => { qp.dispose(); if (!saved) sendBackground(); resolve(); });  // Esc: revierte al valor guardado
+    qp.show();
+  });
+}
 
 function sendProjects() {
   const projects = getProjects();
@@ -1012,7 +1134,8 @@ function getHtml() {
   let fontCss = '';
   try { fontCss = fs.readFileSync(path.join(__dirname, 'media', 'fonts.css'), 'utf8'); } catch (e) {}
   try { fontCss += '\n' + fs.readFileSync(path.join(__dirname, 'media', 'mascot.css'), 'utf8'); } catch (e) {}
-  try { fontCss += '\n' + fs.readFileSync(path.join(__dirname, 'media', 'background.css'), 'utf8'); } catch (e) {}
+  // fondo actual (imagen por defecto o personalizada) + intensidad, inyectados como variables
+  try { fontCss += '\n:root{--bgimg:url("' + currentBgUri() + '");--veil:' + veilFor(bgOpacity()) + ';}'; } catch (e) {}
   return `<!DOCTYPE html>
 <html lang="es">
 <head>
@@ -1033,6 +1156,8 @@ function getHtml() {
     --brand:var(--sans);
     /* interletraje unico para todas las micro-etiquetas en mayusculas */
     --track:.14em;
+    /* velo del fondo: mayor = imagen menos visible (lo ajusta gitArcade.backgroundOpacity) */
+    --veil:.86;
     /* lenguaje de degradado unificado para los botones (ambar/cafe de marca) */
     --grad:linear-gradient(150deg,#e6982f,#c8781f);
     --grad-soft:linear-gradient(160deg,var(--surfA),var(--surfB));
@@ -1043,13 +1168,14 @@ function getHtml() {
     margin:0; padding:14px; color:var(--txt); font-family:var(--sans); font-size:13px; letter-spacing:.01em; overflow-x:hidden;
     background:radial-gradient(120% 80% at 50% -5%, #43301c 0%, rgba(67,48,28,0) 55%), var(--bg2);
   }
-  /* foto del cafe muy sutil de fondo, con velo calido para no restar legibilidad */
+  /* foto de fondo (por defecto o personalizada) con velo calido; --veil controla su visibilidad */
   body::before {
     content:""; position:fixed; inset:0; z-index:-1; pointer-events:none;
     background:
-      linear-gradient(180deg, rgba(32,22,13,.82), rgba(20,14,9,.90)),
+      linear-gradient(rgba(24,16,10,var(--veil,.86)), rgba(18,12,7,var(--veil,.86))),
       var(--bgimg) center/cover no-repeat;
     filter:saturate(.9);
+    transition:background .18s ease;
   }
 
   .panel {
@@ -1072,6 +1198,21 @@ function getHtml() {
   @keyframes spin { from{transform:rotate(0);} to{transform:rotate(360deg);} }
   .expand svg { width:16px; height:16px; stroke:currentColor; fill:none; stroke-width:1.6; }
   .mimg-head,.mimg-full { background-size:contain; background-position:center; background-repeat:no-repeat; }
+
+  /* --- popover de fondo (imagen + intensidad) --- */
+  .bgpop { display:none; position:absolute; top:56px; right:18px; z-index:20; width:232px; flex-direction:column; gap:10px;
+    background:linear-gradient(160deg,rgba(47,32,21,.98),rgba(32,22,13,.99)); border:1px solid var(--bd2); border-radius:12px;
+    padding:13px; box-shadow:0 12px 30px -8px rgba(0,0,0,.8); }
+  .bgpop.show { display:flex; }
+  .bgpop .bgtitle { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:var(--track); text-transform:uppercase; color:var(--lab); }
+  .bgpop .bgrow { display:flex; align-items:center; gap:8px; }
+  .bgpop .bgval { font-family:var(--mono); font-size:11px; color:var(--acc); min-width:34px; text-align:right; }
+  .bgpop input[type=range] { flex:1; accent-color:var(--amber); cursor:pointer; }
+  .bgpop .bgbtns { display:flex; gap:8px; }
+  .bgpop .bgb { flex:1; border:1px solid var(--bd2); border-radius:9px; background:var(--surfA); color:var(--acc);
+    font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; padding:8px 6px; cursor:pointer;
+    transition:color .15s ease, border-color .15s ease, box-shadow .15s ease; }
+  .bgpop .bgb:hover { border-color:var(--amber); color:var(--amber); box-shadow:0 0 10px -3px rgba(224,145,47,.6); }
 
   .field { display:flex; flex-direction:column; gap:6px; }
   .lbl { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:var(--track); text-transform:uppercase; color:var(--lab); }
@@ -1225,9 +1366,24 @@ function getHtml() {
         <button class="expand" id="rescan" title="Re-escanear proyectos">
           <svg viewBox="0 0 20 20"><circle cx="9" cy="9" r="5"/><path d="M17 17l-4-4"/></svg>
         </button>
+        <button class="expand" id="setbg" title="Cambiar fondo y transparencia">
+          <svg viewBox="0 0 20 20"><rect x="3" y="4.5" width="14" height="11" rx="2"/><circle cx="7.5" cy="9" r="1.4"/><path d="M4 15l4-4 3 3 2-2 3 3"/></svg>
+        </button>
         <button class="expand" id="popout" title="Abrir en ventana flotante">
           <svg viewBox="0 0 20 20"><path d="M8 3H3v5M12 17h5v-5M3 3l6 6M17 17l-6-6"/></svg>
         </button>
+      </div>
+    </div>
+
+    <div class="bgpop" id="bgpop">
+      <div class="bgtitle">Fondo del panel</div>
+      <div class="bgrow">
+        <input type="range" id="bgrange" min="0" max="50" value="10" title="Intensidad del fondo">
+        <span class="bgval" id="bgval">10%</span>
+      </div>
+      <div class="bgbtns">
+        <button class="bgb" id="bgpick">Elegir imagen&hellip;</button>
+        <button class="bgb" id="bgreset">Restaurar</button>
       </div>
     </div>
 
@@ -1394,6 +1550,22 @@ function getHtml() {
   $('refresh').addEventListener('click', ()=>{ spin($('refresh')); requestStatus(); });
   $('popout').addEventListener('click', ()=>vscode.postMessage({cmd:'popout'}));
 
+  // --- fondo del panel (imagen + intensidad) ---
+  function applyBackground(uri, opacity){
+    const root=document.documentElement;
+    if(uri) root.style.setProperty('--bgimg','url("'+uri+'")');
+    if(typeof opacity==='number'){
+      const v=Math.max(0.3, Math.min(0.97, 1-opacity)); root.style.setProperty('--veil', v.toFixed(3));
+      const pct=Math.round(opacity*100); $('bgrange').value=pct; $('bgval').textContent=pct+'%';
+    }
+  }
+  $('setbg').addEventListener('click', (e)=>{ e.stopPropagation(); $('bgpop').classList.toggle('show'); });
+  document.addEventListener('click', (e)=>{ const p=$('bgpop'); if(p.classList.contains('show') && !p.contains(e.target) && e.target!==$('setbg') && !$('setbg').contains(e.target)) p.classList.remove('show'); });
+  $('bgrange').addEventListener('input', ()=>{ const pct=parseInt($('bgrange').value,10)||0; $('bgval').textContent=pct+'%'; const v=Math.max(0.3,Math.min(0.97,1-pct/100)); document.documentElement.style.setProperty('--veil', v.toFixed(3)); });
+  $('bgrange').addEventListener('change', ()=>{ const pct=parseInt($('bgrange').value,10)||0; vscode.postMessage({cmd:'bgOpacity', value:pct/100}); });
+  $('bgpick').addEventListener('click', ()=>vscode.postMessage({cmd:'bgImage'}));
+  $('bgreset').addEventListener('click', ()=>vscode.postMessage({cmd:'bgReset'}));
+
   window.addEventListener('message', ev=>{
     const m = ev.data;
     if(m.type==='projects'){
@@ -1409,6 +1581,7 @@ function getHtml() {
     } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
     } else if(m.type==='busy'){ setBusy(true);
     } else if(m.type==='done'){ setBusy(false); markDone();
+    } else if(m.type==='background'){ applyBackground(m.uri, m.opacity);
     } else if(m.type==='log'){ if(m.level==='err') opHadError=true; line(m.text, m.level); }
   });
 

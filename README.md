@@ -58,8 +58,14 @@ Es una **vista fijable**: arrástrala a la barra lateral secundaria (derecha) o 
 | `gitArcade.extraPaths` | `[]` | Carpetas adicionales a escanear (ej. donde clonas repos sueltos). |
 | `gitArcade.scanDepth` | `4` | Profundidad máxima de carpetas a escanear. |
 | `gitArcade.mainBranch` | `""` (auto) | Rama a integrar. Vacío = auto-detectar (`origin/HEAD` → `main` → `master`). |
+| `gitArcade.backgroundImage` | `""` | Imagen personalizada para el fondo del panel. Vacío = foto por defecto (cafetería). |
+| `gitArcade.backgroundOpacity` | `0.1` | Intensidad del fondo (0 = oculto, 1 = pleno). |
 
 Tras crear un proyecto nuevo, ejecuta `Ctrl+Shift+P` → *GIT ARCADE: Re-escanear proyectos*.
+
+### Fondo del panel
+
+Clic en el icono de **imagen** (cabecera) abre un popover con un **slider de intensidad** y botones para **elegir una imagen** propia o **restaurar** la de por defecto. También desde `Ctrl+Shift+P` → *GIT ARCADE: Cambiar fondo del panel*, que ofrece un menú con **vista previa en vivo** de la intensidad. Tus ajustes se guardan y se sincronizan entre la vista fijada y la ventana flotante.
 
 ---
 
@@ -78,6 +84,8 @@ y recarga la ventana de VSCode (*Developer: Reload Window*).
 - `GIT ARCADE: Abrir widget`
 - `GIT ARCADE: Re-escanear proyectos`
 - `GIT ARCADE: Abrir en ventana flotante`
+- `GIT ARCADE: Cambiar fondo del panel`
+- `GIT ARCADE: Restaurar fondo por defecto`
 
 ---
 

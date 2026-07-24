@@ -2,8 +2,10 @@
   "name": "git-arcade",
   "displayName": "Brew",
   "description": "Brew: panel de git tipo cafeteria (check/pull/commit/push, rama, estado) para cualquier proyecto detectado.",
-  "version": "2.5.0",
+  "version": "2.6.0",
   "publisher": "nikolas",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/xSempiternus/git-arcade.git" },
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -46,6 +48,14 @@
       {
         "command": "gitArcade.popout",
         "title": "GIT ARCADE: Abrir en ventana flotante"
+      },
+      {
+        "command": "gitArcade.setBackground",
+        "title": "GIT ARCADE: Cambiar fondo del panel"
+      },
+      {
+        "command": "gitArcade.clearBackground",
+        "title": "GIT ARCADE: Restaurar fondo por defecto"
       }
     ],
     "configuration": {
@@ -71,6 +81,18 @@
           "type": "string",
           "default": "",
           "description": "Rama a integrar. Vacio = detectar automaticamente (origin/HEAD, si no main)."
+        },
+        "gitArcade.backgroundImage": {
+          "type": "string",
+          "default": "",
+          "description": "Ruta a una imagen personalizada para el fondo del panel. Vacio = fondo por defecto (cafeteria). Tambien se cambia desde el icono de imagen del panel."
+        },
+        "gitArcade.backgroundOpacity": {
+          "type": "number",
+          "default": 0.1,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Intensidad de la imagen de fondo (0 = oculta, 1 = plena). Ajustable tambien desde el icono de imagen del panel. Por defecto muy sutil para no restar legibilidad."
         }
       }
     }
