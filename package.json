@@ -2,7 +2,7 @@
   "name": "git-arcade",
   "displayName": "Brew",
   "description": "Brew: panel de git tipo cafeteria (check/pull/commit/push, rama, estado) para cualquier proyecto detectado.",
-  "version": "2.3.0",
+  "version": "2.4.0",
   "publisher": "nikolas",
   "engines": {
     "vscode": "^1.75.0"
@@ -53,13 +53,13 @@
       "properties": {
         "gitArcade.rootPath": {
           "type": "string",
-          "default": "C:\\Users\\nikoa\\Documents\\PROJECTS",
-          "description": "Carpeta raiz principal donde escanear proyectos y repositorios git."
+          "default": "",
+          "description": "Carpeta raiz principal donde escanear proyectos y repositorios git. Vacio = <tu-usuario>/Documents/PROJECTS."
         },
         "gitArcade.extraPaths": {
           "type": "array",
           "items": { "type": "string" },
-          "default": [ "C:\\Users\\nikoa\\Documents" ],
+          "default": [],
           "description": "Carpetas adicionales a escanear (ademas de rootPath). Ej: donde clonas repos sueltos."
         },
         "gitArcade.scanDepth": {

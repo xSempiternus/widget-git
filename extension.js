@@ -2,7 +2,9 @@
 const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
+const BREW_SCHEME = 'brew-git';   // esquema virtual para mostrar la version en HEAD dentro del diff
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
 let statusItem = null;
 let cachedProjects = null;
@@ -53,6 +55,13 @@ function activate(context) {
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(() => autoSelect()),
     vscode.workspace.onDidChangeWorkspaceFolders(() => { cachedProjects = null; autoSelect(); }),
+    // refresco en vivo del estado "sin commitear" al guardar/crear/borrar/renombrar archivos
+    vscode.workspace.onDidSaveTextDocument(doc => onWorkspaceFileChange(doc.uri)),
+    vscode.workspace.onDidCreateFiles(e => e.files.forEach(onWorkspaceFileChange)),
+    vscode.workspace.onDidDeleteFiles(e => e.files.forEach(onWorkspaceFileChange)),
+    vscode.workspace.onDidRenameFiles(e => e.files.forEach(f => onWorkspaceFileChange(f.newUri))),
+    // provee el contenido "HEAD" de un archivo para el diff (git show), sin depender de que el repo este abierto
+    vscode.workspace.registerTextDocumentContentProvider(BREW_SCHEME, brewDiffProvider),
     { dispose: disposeHeadWatchers }
   );
 }
@@ -86,13 +95,14 @@ async function onMessage(msg) {
       case 'rescan': cachedProjects = null; sendProjects(); autoSelect(); break;
       case 'status': await sendStatus(msg.project); break;
       case 'select': await selectProject(msg.project); break;
-      case 'check': await runMain('check', msg.project); break;
-      case 'pull': await runMain('pull', msg.project); break;
-      case 'commit': await commitAction(msg.project, msg.message); break;
-      case 'suggest': await suggestMessage(msg.project); break;
-      case 'push': await pushAction(msg.project); break;
+      case 'check': await runMain('check', msg.project, msg.repos); break;
+      case 'pull': await runMain('pull', msg.project, msg.repos); break;
+      case 'commit': await commitAction(msg.project, msg.message, msg.repos); break;
+      case 'suggest': await suggestMessage(msg.project, msg.repos); break;
+      case 'push': await pushAction(msg.project, msg.repos); break;
       case 'switch': await switchBranch(msg.project, msg.branch); break;
       case 'newbranch': await newBranch(msg.project); break;
+      case 'opendiff': await openDiff(msg.project, msg.repo, msg.path, msg.code); break;
       case 'cancel': cancelOp(); break;
       case 'popout': openPopout(); break;
     }
@@ -120,7 +130,7 @@ function cfg(key, def) {
 function getProjects() {
   if (cachedProjects) return cachedProjects;
   const maxDepth = cfg('scanDepth', 4);
-  const rootPath = cfg('rootPath', 'C:\\Users\\nikoa\\Documents\\PROJECTS');
+  const rootPath = cfg('rootPath', path.join(os.homedir(), 'Documents', 'PROJECTS'));
   const extra = cfg('extraPaths', []) || [];
   const roots = [rootPath, ...extra].filter(Boolean);
   const rootsLower = roots.map(r => String(r).toLowerCase());
@@ -180,6 +190,33 @@ function git(cwd, args) {
   });
 }
 
+// Lee el contenido de un archivo en una referencia (git show <ref>:<path>) SIN recortar,
+// para mostrarlo intacto en el diff. Funciona para cualquier repo, este abierto o no.
+function gitShowRaw(cwd, ref, relPath) {
+  return new Promise((resolve) => {
+    if (ref === '__EMPTY__') return resolve('');
+    const child = cp.spawn('git', ['--no-pager', 'show', `${ref}:${relPath}`], { cwd, windowsHide: true });
+    let out = '';
+    child.stdout.on('data', d => out += d.toString());
+    child.on('error', () => resolve(''));
+    child.on('close', code => resolve(code === 0 ? out : ''));
+  });
+}
+
+// Provee el contenido "HEAD" (o vacio) de un archivo para el editor de diff nativo.
+const brewDiffProvider = {
+  provideTextDocumentContent(uri) {
+    let q; try { q = JSON.parse(uri.query || '{}'); } catch (e) { return ''; }
+    if (!q.repo) return '';
+    return gitShowRaw(q.repo, q.ref || 'HEAD', q.path || '');
+  }
+};
+
+// URI virtual (brew-git:) que el provider de arriba resuelve a la version en <ref>.
+function brewUri(repoPath, ref, relPath) {
+  return vscode.Uri.from({ scheme: BREW_SCHEME, path: '/' + relPath, query: JSON.stringify({ repo: repoPath, ref, path: relPath }) });
+}
+
 // Cancela la operacion en curso: mata el proceso git activo y marca la bandera.
 function cancelOp() {
   opCancelled = true;
@@ -197,6 +234,11 @@ async function defaultBranch(cwd) {
 }
 
 function findProject(name) { return getProjects().find(p => p.name === name); }
+
+// Filtra los repos de un proyecto por los seleccionados en el panel (vacio/ausente = todos).
+function filterRepos(proj, names) {
+  return (Array.isArray(names) && names.length) ? proj.repos.filter(r => names.includes(r.name)) : proj.repos;
+}
 
 // ---------------------------------------------------------------------------
 //  Sincronizacion con VSCode (extension <-> editor / terminal)
@@ -255,6 +297,24 @@ function autoSelect() {
   if (name) post({ type: 'select', project: name });
 }
 
+// Refresco en vivo (con debounce) del estado del proyecto activo tras editar archivos.
+let dirtyDebounce = null;
+function scheduleDirtyRefresh() {
+  if (!currentProject) return;
+  if (dirtyDebounce) clearTimeout(dirtyDebounce);
+  dirtyDebounce = setTimeout(() => { if (currentProject) sendStatus(currentProject); }, 400);
+}
+// Un archivo del proyecto activo cambio en VSCode -> reprograma el refresco del estado.
+function onWorkspaceFileChange(uri) {
+  if (!uri || uri.scheme !== 'file' || !currentProject) return;
+  const proj = findProject(currentProject);
+  if (!proj) return;
+  const fp = uri.fsPath.toLowerCase();
+  const inside = (c, p) => c === p || c.startsWith(p + path.sep);
+  const hit = inside(fp, proj.dir.toLowerCase()) || proj.repos.some(r => inside(fp, r.path.toLowerCase()));
+  if (hit) scheduleDirtyRefresh();
+}
+
 // El usuario eligio un proyecto en el dropdown: abre su carpeta como workspace en VSCode.
 // Si ya esta abierta, solo refresca el estado (no recarga la ventana).
 async function selectProject(name) {
@@ -279,6 +339,8 @@ function armHeadWatchers(proj) {
     try {
       const w = fs.watch(gitDir, { persistent: false }, (event, filename) => {
         const fn = filename ? filename.toString() : '';
+        // staging desde la terminal (git add/reset) toca .git/index -> refresca el estado "sin commitear"
+        if (fn === 'index') { if (Date.now() < suppressWatchUntil) return; scheduleDirtyRefresh(); return; }
         if (fn !== 'HEAD' && fn !== 'ORIG_HEAD') return;
         if (Date.now() < suppressWatchUntil) return;   // ignora nuestros propios checkouts
         if (headDebounce) clearTimeout(headDebounce);
@@ -438,14 +500,15 @@ function assistantHint(projName, results) {
 // ---------------------------------------------------------------------------
 //  CHECK / PULL main
 // ---------------------------------------------------------------------------
-async function runMain(kind, projectName) {
+async function runMain(kind, projectName, repoNames) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'log', level: 'err', text: 'Proyecto no encontrado' }); post({ type: 'done' }); return; }
+  const repos = filterRepos(proj, repoNames);
   post({ type: 'busy' });
   post({ type: 'log', level: 'hdr', text: `== ${kind === 'check' ? 'CHECK' : 'PULL'} :: ${proj.name} ==` });
 
   let pending = 0, conflicts = 0;
-  for (const repo of proj.repos) {
+  for (const repo of repos) {
     if (opCancelled) break;
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
@@ -534,15 +597,16 @@ async function runMain(kind, projectName) {
 // ---------------------------------------------------------------------------
 //  COMMIT (add -A + commit) en cada repo con cambios
 // ---------------------------------------------------------------------------
-async function commitAction(projectName, message) {
+async function commitAction(projectName, message, repoNames) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'log', level: 'err', text: 'Proyecto no encontrado' }); post({ type: 'done' }); return; }
   if (!message || !message.trim()) { post({ type: 'log', level: 'err', text: 'Escribe un mensaje de commit' }); post({ type: 'done' }); return; }
+  const repos = filterRepos(proj, repoNames);
   post({ type: 'busy' });
   post({ type: 'log', level: 'hdr', text: `== COMMIT :: ${proj.name} ==` });
 
   let done = 0;
-  for (const repo of proj.repos) {
+  for (const repo of repos) {
     if (opCancelled) break;
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
@@ -562,14 +626,15 @@ async function commitAction(projectName, message) {
 // ---------------------------------------------------------------------------
 //  PUSH (crea upstream si falta)
 // ---------------------------------------------------------------------------
-async function pushAction(projectName) {
+async function pushAction(projectName, repoNames) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'log', level: 'err', text: 'Proyecto no encontrado' }); post({ type: 'done' }); return; }
+  const repos = filterRepos(proj, repoNames);
   post({ type: 'busy' });
   post({ type: 'log', level: 'hdr', text: `== PUSH :: ${proj.name} ==` });
 
   let failed = 0;
-  for (const repo of proj.repos) {
+  for (const repo of repos) {
     if (opCancelled) break;
     const branch = (await git(repo.path, ['rev-parse', '--abbrev-ref', 'HEAD'])).out || '?';
     const tag = `${repo.name} (${branch})`;
@@ -632,18 +697,19 @@ const isDoc = p => /\.(md|mdx|rst|txt)$/i.test(p) || /(^|\/)docs?\//i.test(p);
 const isStyle = p => /\.(css|scss|sass|less|styl)$/i.test(p);
 const isConfig = p => /(package(-lock)?\.json|yarn\.lock|pnpm-lock\.ya?ml|\.ya?ml|\.toml|dockerfile|\.dockerignore|\.gitignore|\.env|tsconfig|\.eslintrc|\.prettier|vite\.config|webpack|babel\.config)/i.test(p);
 
-async function suggestMessage(projectName) {
+async function suggestMessage(projectName, repoNames) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'done' }); return; }
+  const repos = filterRepos(proj, repoNames);
   post({ type: 'busy' });
   post({ type: 'log', level: 'dim', text: 'Analizando diff…' });
 
   const changes = [];        // {code,path,add,del,kind,repo}
   let convStyle = false;     // el repo usa conventional commits?
   let fixSignal = false, featSignal = false;
-  const multiRepo = proj.repos.length > 1;
+  const multiRepo = repos.length > 1;
 
-  for (const repo of proj.repos) {
+  for (const repo of repos) {
     const st = await git(repo.path, ['status', '--porcelain']);
     const rows = (st.out || '').split('\n').filter(Boolean);
     if (!rows.length) continue;
@@ -799,6 +865,32 @@ async function newBranch(projectName) {
   refreshVscodeGit();
   post({ type: 'done' });
   await sendStatus(projectName);
+}
+
+// ---------------------------------------------------------------------------
+//  VER DIFF de un archivo (clic en la lista de cambios) con el diff nativo
+// ---------------------------------------------------------------------------
+async function openDiff(projectName, repoName, relPath, code) {
+  const proj = findProject(projectName);
+  if (!proj || !relPath) return;
+  const repo = proj.repos.find(r => r.name === repoName) || proj.repos[0];
+  if (!repo) return;
+  let rel = relPath.replace(/^"|"$/g, '');
+  if (rel.includes(' -> ')) rel = rel.split(' -> ').pop().replace(/^"|"$/g, '');   // renombrado: usa el nombre nuevo
+  const full = vscode.Uri.file(path.join(repo.path, rel));
+  const c = (code || '').trim();
+  // nuevos/sin trackear/renombrados: no hay version previa que comparar -> abre el archivo
+  if (c.includes('?') || c.includes('A') || c.includes('R')) {
+    try { await vscode.window.showTextDocument(full, { preview: true }); } catch (e) {}
+    return;
+  }
+  const left = brewUri(repo.path, 'HEAD', rel);
+  if (c.includes('D')) {   // eliminado: HEAD vs vacio
+    const right = brewUri(repo.path, '__EMPTY__', rel);
+    await vscode.commands.executeCommand('vscode.diff', left, right, `${rel} (HEAD ↔ eliminado)`, { preview: true });
+    return;
+  }
+  await vscode.commands.executeCommand('vscode.diff', left, full, `${rel} (HEAD ↔ local)`, { preview: true });
 }
 
 // ---------------------------------------------------------------------------
@@ -1076,6 +1168,10 @@ function getHtml() {
   let lastAction = null;      // ultimo boton de accion pulsado (para marcarlo "hecho")
   let doneTimer = null;
   let opHadError = false;     // hubo algun error durante la operacion en curso?
+  let deselected = new Set(); // repos DES-seleccionados (por defecto todos van incluidos)
+  let currentRepoNames = [];  // repos del proyecto mostrado ahora mismo
+  function selectedRepoNames(){ return currentRepoNames.filter(n=>!deselected.has(n)); }
+  function ensureSelection(){ if(currentRepoNames.length>1 && selectedRepoNames().length===0){ clearScreen(); line('Selecciona al menos un repo','err'); return false; } return true; }
 
   function line(text, level){ const d=document.createElement('div'); d.className=level||'info'; d.textContent=text;
     screen.appendChild(d); screen.scrollTop=screen.scrollHeight; }
@@ -1123,6 +1219,8 @@ function getHtml() {
     renderBranchBar(branches, current);
     if(hint) setHint(hint);
     statusEl.innerHTML='';
+    currentRepoNames = repos.map(r=>r.name);
+    for(const n of Array.from(deselected)) if(!currentRepoNames.includes(n)) deselected.delete(n);
     repos.forEach(r=>{
       const hasFiles = r.files && r.files.length;
       let state='st-clean';
@@ -1142,14 +1240,23 @@ function getHtml() {
       if(r.mergedInMain && !r.onMain && r.dirty===0 && !r.phantomAhead && r.ahead===0) badges+=' <span class="badge b-merged" title="Su trabajo ya vive en main">fusionada</span>';
       if(r.hasRemote===false) badges+=' <span class="badge b-noremote">sin remoto</span>';
       row.innerHTML='<span class="br"><span class="dot"></span><span class="ico">&#9095;</span>'+r.branch+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
+      // en proyectos multi-repo, checkbox para elegir a que repos aplicar Commit/Push/Pull/Check
+      if(repos.length>1){
+        const cb=document.createElement('input'); cb.type='checkbox'; cb.className='rsel';
+        cb.checked=!deselected.has(r.name); cb.title='Incluir '+r.name+' en Commit / Push / Pull / Check';
+        cb.style.marginRight='7px'; cb.style.cursor='pointer'; cb.style.accentColor='#e0912f'; cb.style.flex='0 0 auto';
+        cb.addEventListener('click', ev=>{ ev.stopPropagation(); if(cb.checked) deselected.delete(r.name); else deselected.add(r.name); });
+        row.insertBefore(cb, row.firstChild);
+      }
       statusEl.appendChild(row);
       if(hasFiles){
         const fl=document.createElement('div'); fl.className='files';
         r.files.forEach(f=>{
-          const div=document.createElement('div'); div.className='f';
+          const div=document.createElement('div'); div.className='f'; div.style.cursor='pointer'; div.title='Ver diff';
           const c=document.createElement('span'); c.className='c '+fileClass(f.code); c.textContent=(f.code||'').trim()||'M';
           const pth=document.createElement('span'); pth.className='p'; pth.textContent=f.path;
           div.appendChild(c); div.appendChild(pth); fl.appendChild(div);
+          div.addEventListener('click', ev=>{ ev.stopPropagation(); vscode.postMessage({cmd:'opendiff', project:sel.value, repo:r.name, path:f.path, code:f.code}); });
         });
         statusEl.appendChild(fl);
         row.addEventListener('click', ()=>{ row.classList.toggle('open'); fl.classList.toggle('open'); });
@@ -1157,16 +1264,16 @@ function getHtml() {
     });
   }
 
-  sel.addEventListener('change', ()=>{ if(!sel.value) return; requestStatus(); vscode.postMessage({cmd:'select', project:sel.value}); });
+  sel.addEventListener('change', ()=>{ if(!sel.value) return; deselected.clear(); requestStatus(); vscode.postMessage({cmd:'select', project:sel.value}); });
   $('branchsel').addEventListener('change', ()=>{ const b=$('branchsel').value; if(!sel.value||!b)return; clearScreen(); vscode.postMessage({cmd:'switch', project:sel.value, branch:b}); });
   $('gotomain').addEventListener('click', ()=>{ if(!sel.value||!mainBranch)return; clearScreen(); vscode.postMessage({cmd:'switch', project:sel.value, branch:mainBranch}); });
   $('newbranch').addEventListener('click', ()=>{ if(!sel.value)return; vscode.postMessage({cmd:'newbranch', project:sel.value}); });
-  $('check').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('check'); vscode.postMessage({cmd:'check', project:sel.value}); });
-  $('pull').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('pull'); vscode.postMessage({cmd:'pull', project:sel.value}); });
+  $('check').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); lastAction=$('check'); vscode.postMessage({cmd:'check', project:sel.value, repos:selectedRepoNames()}); });
+  $('pull').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); lastAction=$('pull'); vscode.postMessage({cmd:'pull', project:sel.value, repos:selectedRepoNames()}); });
   msg.addEventListener('input', autogrow);
-  $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); lastAction=$('commit'); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim()}); msg.value=''; autogrow(); });
-  $('push').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); lastAction=$('push'); vscode.postMessage({cmd:'push', project:sel.value}); });
-  $('suggest').addEventListener('click', ()=>{ if(!sel.value)return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value}); });
+  $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!ensureSelection())return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); lastAction=$('commit'); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim(), repos:selectedRepoNames()}); msg.value=''; autogrow(); });
+  $('push').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); lastAction=$('push'); vscode.postMessage({cmd:'push', project:sel.value, repos:selectedRepoNames()}); });
+  $('suggest').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value, repos:selectedRepoNames()}); });
   $('cancel').addEventListener('click', ()=>{ line('Cancelando…','warn'); vscode.postMessage({cmd:'cancel'}); });
   function spin(el){ if(!el)return; el.classList.remove('spin'); void el.offsetWidth; el.classList.add('spin'); }
   $('rescan').addEventListener('click', ()=>{ spin($('rescan')); vscode.postMessage({cmd:'rescan'}); });

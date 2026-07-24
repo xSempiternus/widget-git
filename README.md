@@ -10,7 +10,9 @@ Brew es una **alternativa simplificada al Source Control** de VSCode: enfocada e
 
 - **Auto-detecta proyectos** escaneando `gitArcade.rootPath` (y carpetas extra) en busca de repos `.git`.
 - **Agrupa por carpeta**: los repos hermanos (ej. `Fidelya-backend` + `Fidelya-frontend`) forman un mismo proyecto y las acciones se aplican a todos a la vez.
-- **Estado por repo**: rama actual, ahead/behind vs. remoto, nº de cambios y lista desplegable de archivos modificados (solo lectura).
+- **Estado por repo**: rama actual, ahead/behind vs. remoto, nº de cambios y lista desplegable de archivos modificados. **En vivo**: al guardar, crear o borrar archivos (desde VSCode o la terminal) el estado se refresca solo.
+- **Ver diff**: clic en cualquier archivo de la lista abre su diff nativo (HEAD ↔ tu versión) en el editor.
+- **Selección por repo**: en proyectos multi-repo, un checkbox por repo elige a cuáles aplicar Commit / Push / Pull / Check.
 - **Asistente**: lee el estado real y te sugiere el próximo paso — detecta ramas ya fusionadas, "ahead fantasma" (commits que ya viven en el remoto), ramas sin upstream, etc., para que no hagas un Push de más ni un Publish equivocado.
 
 ### Botones
@@ -52,8 +54,8 @@ Es una **vista fijable**: arrástrala a la barra lateral secundaria (derecha) o 
 
 | Ajuste | Default | Descripción |
 |---|---|---|
-| `gitArcade.rootPath` | `Documents\PROJECTS` | Carpeta raíz principal a escanear. |
-| `gitArcade.extraPaths` | `[ Documents ]` | Carpetas adicionales a escanear (ej. donde clonas repos sueltos). |
+| `gitArcade.rootPath` | `""` (auto) | Carpeta raíz principal a escanear. Vacío = `<tu-usuario>/Documents/PROJECTS`. |
+| `gitArcade.extraPaths` | `[]` | Carpetas adicionales a escanear (ej. donde clonas repos sueltos). |
 | `gitArcade.scanDepth` | `4` | Profundidad máxima de carpetas a escanear. |
 | `gitArcade.mainBranch` | `""` (auto) | Rama a integrar. Vacío = auto-detectar (`origin/HEAD` → `main` → `master`). |
 
