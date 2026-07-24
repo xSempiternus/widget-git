@@ -3,6 +3,7 @@ const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType } = require('./lib/logic');
 
 const BREW_SCHEME = 'brew-git';   // esquema virtual para mostrar la version en HEAD dentro del diff
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
@@ -51,7 +52,7 @@ function activate(context) {
     vscode.commands.registerCommand('gitArcade.setBackground', setBackgroundFlow),
     vscode.commands.registerCommand('gitArcade.clearBackground', clearBackgroundFlow),
     vscode.commands.registerCommand('gitArcade.rescan', () => {
-      invalidateCache(); sendProjects();
+      invalidateCache(); refreshProjectsAsync();
       vscode.window.showInformationMessage('GIT ARCADE: proyectos re-escaneados.');
     })
   );
@@ -67,7 +68,7 @@ function activate(context) {
   // al cambiar el editor o las carpetas del workspace, auto-selecciona el proyecto que toca
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(() => autoSelect()),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { invalidateCache(); autoSelect(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { invalidateCache(); refreshProjectsAsync().then(autoSelect); }),
     // refresco en vivo del estado "sin commitear" al guardar/crear/borrar/renombrar archivos
     vscode.workspace.onDidSaveTextDocument(doc => onWorkspaceFileChange(doc.uri)),
     vscode.workspace.onDidCreateFiles(e => e.files.forEach(onWorkspaceFileChange)),
@@ -77,6 +78,9 @@ function activate(context) {
     vscode.workspace.registerTextDocumentContentProvider(BREW_SCHEME, brewDiffProvider),
     { dispose: disposeHeadWatchers }
   );
+
+  // calienta la cache de proyectos con I/O asincrona al arrancar (no bloquea el host)
+  refreshProjectsAsync();
 }
 
 function deactivate() {}
@@ -105,7 +109,7 @@ async function onMessage(msg) {
     if (msg.cmd === 'switch' || msg.cmd === 'newbranch') suppressWatchUntil = Date.now() + 2500;
     switch (msg.cmd) {
       case 'ready': sendProjects(); autoSelect(); sendBackground(); break;
-      case 'rescan': invalidateCache(); sendProjects(); autoSelect(); break;
+      case 'rescan': invalidateCache(); refreshProjectsAsync().then(autoSelect); break;
       case 'setbg': await setBackgroundFlow(); break;
       case 'bgImage': await pickBackgroundImage(); break;
       case 'bgReset': await clearBackgroundFlow(); break;
@@ -152,8 +156,7 @@ function bgOpacity() {
   if (!isFinite(p)) p = 0.10;
   return Math.max(0, Math.min(1, p));
 }
-// a mayor visibilidad de la imagen, menor velo oscuro encima.
-function veilFor(p) { return Math.max(0.3, Math.min(0.97, 1 - p)).toFixed(3); }
+// (veilFor vive en lib/logic.js)
 // imagen vigente: la personalizada si existe y es valida; si no, la de por defecto.
 function currentBgUri() {
   const custom = cfg('backgroundImage', '');
@@ -253,26 +256,19 @@ function cfg(key, def) {
   return (v === undefined || v === null || v === '') ? def : v;
 }
 
-function getProjects() {
-  if (cachedProjects && (Date.now() - cacheTime) < PROJECTS_TTL) return cachedProjects;
+// raices a escanear + profundidad (segun config).
+function scanRoots() {
   const maxDepth = cfg('scanDepth', 4);
   const rootPath = cfg('rootPath', path.join(os.homedir(), 'Documents', 'PROJECTS'));
   const extra = cfg('extraPaths', []) || [];
   const roots = [rootPath, ...extra].filter(Boolean);
-  const rootsLower = roots.map(r => String(r).toLowerCase());
+  return { roots, rootsLower: roots.map(r => String(r).toLowerCase()), maxDepth };
+}
 
-  const seen = new Set();
-  const repos = [];
-  for (const root of roots) {
-    const found = [];
-    scan(root, 0, maxDepth, found);
-    for (const p of found) {
-      const k = p.toLowerCase();
-      if (seen.has(k)) continue;
-      seen.add(k); repos.push(p);
-    }
-  }
-
+// agrupa rutas de repos en proyectos (repos hermanos bajo una carpeta = un proyecto).
+function groupRepos(repoPaths, rootsLower) {
+  const seen = new Set(); const repos = [];
+  for (const p of repoPaths) { const k = p.toLowerCase(); if (!seen.has(k)) { seen.add(k); repos.push(p); } }
   const groups = new Map();
   for (const repoPath of repos) {
     const parent = path.dirname(repoPath);
@@ -280,9 +276,34 @@ function getProjects() {
     if (!groups.has(key)) groups.set(key, { name: path.basename(key), dir: key, repos: [] });
     groups.get(key).repos.push({ name: path.basename(repoPath), path: repoPath });
   }
-  cachedProjects = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+  return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Version SINCRONA (fallback): la usa cualquier llamador sincrono con la cache fria.
+function getProjects() {
+  if (cachedProjects && (Date.now() - cacheTime) < PROJECTS_TTL) return cachedProjects;
+  const { roots, rootsLower, maxDepth } = scanRoots();
+  const found = [];
+  for (const root of roots) scan(root, 0, maxDepth, found);
+  cachedProjects = groupRepos(found, rootsLower);
   cacheTime = Date.now();
   return cachedProjects;
+}
+
+// Version ASINCRONA (proactiva): reconstruye la cache con I/O no bloqueante y avisa a los
+// webviews. Se dispara al arrancar y al re-escanear, para que el escaneo no congele el host.
+let refreshing = null;
+async function refreshProjectsAsync() {
+  if (refreshing) return refreshing;
+  refreshing = (async () => {
+    const { roots, rootsLower, maxDepth } = scanRoots();
+    const found = [];
+    for (const root of roots) await scanAsync(root, 0, maxDepth, found);
+    cachedProjects = groupRepos(found, rootsLower);
+    cacheTime = Date.now();
+  })();
+  try { await refreshing; } finally { refreshing = null; }
+  sendProjects();
 }
 
 function scan(dir, depth, maxDepth, out) {
@@ -291,12 +312,26 @@ function scan(dir, depth, maxDepth, out) {
   try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
   if (entries.some(e => e.isDirectory() && e.name === '.git')) { out.push(dir); return; }
   for (const e of entries) {
-    if (!e.isDirectory()) continue;
-    const n = e.name;
-    if (n === 'node_modules' || n === '.git' || n === 'dist' || n === 'build' ||
-        n === '.next' || n === 'vendor' || n === '.venv' || n === '__pycache__') continue;
-    scan(path.join(dir, n), depth + 1, maxDepth, out);
+    if (!e.isDirectory() || skipDir(e.name)) continue;
+    scan(path.join(dir, e.name), depth + 1, maxDepth, out);
   }
+}
+
+async function scanAsync(dir, depth, maxDepth, out) {
+  if (depth > maxDepth) return;
+  let entries;
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (e) { return; }
+  if (entries.some(e => e.isDirectory() && e.name === '.git')) { out.push(dir); return; }
+  for (const e of entries) {
+    if (!e.isDirectory() || skipDir(e.name)) continue;
+    await scanAsync(path.join(dir, e.name), depth + 1, maxDepth, out);
+  }
+}
+
+// carpetas que no vale la pena recorrer buscando repos.
+function skipDir(n) {
+  return n === 'node_modules' || n === '.git' || n === 'dist' || n === 'build' ||
+    n === '.next' || n === 'vendor' || n === '.venv' || n === '__pycache__';
 }
 
 // ---------------------------------------------------------------------------
@@ -596,53 +631,7 @@ async function sendStatus(projectName) {
   post({ type: 'status', project: projectName, repos, branches, current, mainBranch, hint: assistantHint(proj.name, results) });
 }
 
-// Escapa texto (nombres de rama/repo, que git permite con < > & ") antes de meterlo en HTML.
-function htmlEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-
-// Mensaje proactivo de la mascota-asistente segun el estado agregado.
-// El orden importa: los casos "trampa" (donde Push seria un error) van PRIMERO.
-function assistantHint(projName, results) {
-  const noRemote = results.filter(r => !r.hasRemote);
-  const dirty = results.reduce((s, r) => s + r.dirty, 0);
-  const behind = results.reduce((s, r) => s + r.behind, 0);
-  const noUp = results.filter(r => r.hasRemote && !r.hasUp);
-
-  if (noRemote.length) {
-    const n = noRemote.map(r => htmlEsc(r.name)).join(', ');
-    return `&#9888; ${n} no est&aacute; conectado a un remoto. Con&eacute;ctalo: <span class="mono">git remote add origin &lt;url&gt;</span> y luego Push.`;
-  }
-  if (dirty > 0) return `Tienes <b>${dirty} cambio(s) sin commitear</b> &#9749; &mdash; escribe un mensaje (o dale &#10024;) y Commit.`;
-
-  // CASO TRAMPA (apuntes de flujo): estas parado en una rama con "ahead N" pero esos
-  // commits YA viven en main en el servidor. Es una etiqueta vieja apuntando atras,
-  // no trabajo tuyo pendiente. Push aqui reviviria una rama muerta -> mejor ir a main.
-  const phantom = results.filter(r => r.phantomAhead);
-  if (phantom.length) {
-    const r = phantom[0]; const rb = htmlEsc(r.branch), rm = htmlEsc(r.main);
-    return `Est&aacute;s en <b>${rb}</b> con <b>${r.ahead} &laquo;commit(s) sin pushear&raquo;</b>, pero esos commits <b>ya est&aacute;n en el servidor dentro de <span class="mono">${rm}</span></b>. &laquo;ahead&raquo; compara punteros, no mide tu trabajo: es una etiqueta vieja apuntando atr&aacute;s. <b>No hagas Push.</b> Dale <b>&#8962; Ir a ${rm}</b>.`;
-  }
-
-  // ahead REAL: hay commits tuyos que main todavia no tiene -> Push si tiene sentido.
-  const realAhead = results.reduce((s, r) => s + ((r.phantomAhead) ? 0 : r.ahead), 0);
-  if (realAhead > 0) return `Tienes <b>${realAhead} commit(s) sin pushear</b> &#8593; &mdash; dale <b>Push</b> para subirlos.`;
-
-  // rama sin upstream que YA existe en el remoto: no es "publicar", es "enlazar"
-  const linkNeeded = noUp.filter(r => r.remoteHasBranch);
-  if (linkNeeded.length) {
-    const r = linkNeeded[0];
-    return `Tu rama <b>ya existe en GitHub</b> pero no est&aacute; enlazada (por eso VS Code dice &laquo;Publish Branch&raquo;). Enl&aacute;zala: <span class="mono">git branch --set-upstream-to=origin/${htmlEsc(r.branch)}</span> y luego <b>Pull</b>. No uses Publish.`;
-  }
-  if (noUp.length) return `Tu rama es <b>nueva</b> (no est&aacute; en el remoto) &#8593; &mdash; dale <b>Push</b> y la creo en GitHub.`;
-  if (behind > 0) return `Hay <b>${behind} commit(s) nuevo(s)</b> en el remoto &#8595; &mdash; dale <b>Pull</b>.`;
-
-  // rama limpia y ya fusionada en main: su trabajo ya vive en main. Volver a main es higiene.
-  const merged = results.filter(r => r.mergedInMain && !r.onMain);
-  if (merged.length) {
-    const r = merged[0]; const rb = htmlEsc(r.branch), rm = htmlEsc(r.main);
-    return `<b>${rb}</b> ya est&aacute; <b>fusionada en <span class="mono">${rm}</span></b>: su trabajo ya vive ah&iacute;. Puedes volver con <b>&#8962; Ir a ${rm}</b> sin perder nada.`;
-  }
-  return `Todo al d&iacute;a &#10024; &iquest;un cafecito? &#9749;`;
-}
+// (htmlEsc y assistantHint viven ahora en lib/logic.js para poder testearlos)
 
 // ---------------------------------------------------------------------------
 //  CHECK / PULL main
@@ -852,23 +841,8 @@ async function pushAction(projectName, repoNames) {
 
 // ---------------------------------------------------------------------------
 //  SUGERIR mensaje de commit (analiza el diff real; genera asunto + cuerpo)
+//  (baseName/topDir/briefList/cap, los clasificadores y commitType estan en lib/logic.js)
 // ---------------------------------------------------------------------------
-function baseName(p) { return p.split('/').pop().replace(/"/g, ''); }
-function topDir(p) { const parts = p.split('/'); return parts.length > 1 ? parts[0] : ''; }
-function briefList(names, max) {
-  const u = Array.from(new Set(names)); max = max || 2;
-  if (u.length === 1) return u[0];
-  if (u.length <= max) return u.slice(0, -1).join(', ') + ' y ' + u[u.length - 1];
-  return `${u.slice(0, max).join(', ')} y ${u.length - max} mas`;
-}
-function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
-
-// clasificadores de archivo
-const isTest = p => /(^|\/)(tests?|__tests__|spec|e2e)(\/|$)|\.(test|spec)\.[a-z]+$/i.test(p);
-const isDoc = p => /\.(md|mdx|rst|txt)$/i.test(p) || /(^|\/)docs?\//i.test(p);
-const isStyle = p => /\.(css|scss|sass|less|styl)$/i.test(p);
-const isConfig = p => /(package(-lock)?\.json|yarn\.lock|pnpm-lock\.ya?ml|\.ya?ml|\.toml|dockerfile|\.dockerignore|\.gitignore|\.env|tsconfig|\.eslintrc|\.prettier|vite\.config|webpack|babel\.config)/i.test(p);
-
 async function suggestMessage(projectName, repoNames) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'done' }); return; }
@@ -941,22 +915,8 @@ async function suggestMessage(projectName, repoNames) {
   const totalAdd = changes.reduce((s, c) => s + c.add, 0);
   const totalDel = changes.reduce((s, c) => s + c.del, 0);
 
-  // --- tipo ---
-  const allDocs = paths.every(isDoc);
-  const allStyle = paths.every(isStyle);
-  const allTest = paths.every(isTest);
-  const allConfig = paths.every(isConfig);
-  let type;
-  if (allDocs) type = 'docs';
-  else if (allTest) type = 'test';
-  else if (allStyle) type = 'style';
-  else if (allConfig) type = 'chore';
-  else if (fixSignal && !added.length) type = 'fix';
-  else if (added.length && (featSignal || !modified.length)) type = 'feat';
-  else if (deleted.length && !added.length && !modified.length) type = 'chore';
-  else if (renamed.length && !added.length && !modified.length) type = 'refactor';
-  else if (fixSignal) type = 'fix';
-  else type = 'refactor';
+  // --- tipo (Conventional Commits) ---
+  const type = commitType({ paths, added, modified, deleted, renamed, fixSignal, featSignal });
 
   // --- scope: carpeta de primer nivel mas comun (ignora archivos raiz) ---
   const dirCount = {};

@@ -17,6 +17,9 @@
     "onStartupFinished"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "contributes": {
     "viewsContainers": {
       "activitybar": [
