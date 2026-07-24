@@ -8,6 +8,10 @@ const BREW_SCHEME = 'brew-git';   // esquema virtual para mostrar la version en 
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
 let statusItem = null;
 let cachedProjects = null;
+let cacheTime = 0;                       // cuando se construyo cachedProjects (para el TTL)
+const PROJECTS_TTL = 60000;              // re-escanea repos nuevos sin rescan manual pasado 1 min
+const defaultBranchCache = new Map();    // rama principal por repo (rara vez cambia)
+function invalidateCache() { cachedProjects = null; defaultBranchCache.clear(); }
 let currentProject = null;   // proyecto seleccionado ahora mismo (para el auto-refresco)
 let headWatchers = [];       // fs.watch sobre cada .git para detectar cambios de rama externos
 let headDebounce = null;
@@ -45,7 +49,7 @@ function activate(context) {
     vscode.commands.registerCommand('gitArcade.open', () => vscode.commands.executeCommand('gitArcadeView.focus')),
     vscode.commands.registerCommand('gitArcade.popout', openPopout),
     vscode.commands.registerCommand('gitArcade.rescan', () => {
-      cachedProjects = null; sendProjects();
+      invalidateCache(); sendProjects();
       vscode.window.showInformationMessage('GIT ARCADE: proyectos re-escaneados.');
     })
   );
@@ -54,7 +58,7 @@ function activate(context) {
   // al cambiar el editor o las carpetas del workspace, auto-selecciona el proyecto que toca
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor(() => autoSelect()),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { cachedProjects = null; autoSelect(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { invalidateCache(); autoSelect(); }),
     // refresco en vivo del estado "sin commitear" al guardar/crear/borrar/renombrar archivos
     vscode.workspace.onDidSaveTextDocument(doc => onWorkspaceFileChange(doc.uri)),
     vscode.workspace.onDidCreateFiles(e => e.files.forEach(onWorkspaceFileChange)),
@@ -92,7 +96,7 @@ async function onMessage(msg) {
     if (msg.cmd === 'switch' || msg.cmd === 'newbranch') suppressWatchUntil = Date.now() + 2500;
     switch (msg.cmd) {
       case 'ready': sendProjects(); autoSelect(); break;
-      case 'rescan': cachedProjects = null; sendProjects(); autoSelect(); break;
+      case 'rescan': invalidateCache(); sendProjects(); autoSelect(); break;
       case 'status': await sendStatus(msg.project); break;
       case 'select': await selectProject(msg.project); break;
       case 'check': await runMain('check', msg.project, msg.repos); break;
@@ -128,7 +132,7 @@ function cfg(key, def) {
 }
 
 function getProjects() {
-  if (cachedProjects) return cachedProjects;
+  if (cachedProjects && (Date.now() - cacheTime) < PROJECTS_TTL) return cachedProjects;
   const maxDepth = cfg('scanDepth', 4);
   const rootPath = cfg('rootPath', path.join(os.homedir(), 'Documents', 'PROJECTS'));
   const extra = cfg('extraPaths', []) || [];
@@ -155,6 +159,7 @@ function getProjects() {
     groups.get(key).repos.push({ name: path.basename(repoPath), path: repoPath });
   }
   cachedProjects = Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
+  cacheTime = Date.now();
   return cachedProjects;
 }
 
@@ -177,6 +182,7 @@ function scan(dir, depth, maxDepth, out) {
 // ---------------------------------------------------------------------------
 let activeChild = null;      // proceso git en curso (para poder cancelarlo)
 let opCancelled = false;     // el usuario cancelo la operacion actual?
+let activeLmCancel = null;   // cancela la peticion al modelo de IA (sugerencia de commit)
 
 function git(cwd, args) {
   return new Promise((resolve) => {
@@ -221,16 +227,32 @@ function brewUri(repoPath, ref, relPath) {
 function cancelOp() {
   opCancelled = true;
   if (activeChild) { try { activeChild.kill(); } catch (e) {} }
+  if (activeLmCancel) { try { activeLmCancel.cancel(); } catch (e) {} }
   post({ type: 'log', level: 'warn', text: '>> Cancelando operacion...' });
+}
+
+// Tras matar un git a mitad de un commit/merge puede quedar un .git/index.lock huerfano
+// que bloquea las siguientes operaciones. Lo limpia (solo se llama al cancelar, sin git vivo).
+function cleanupLocks(repos) {
+  for (const r of repos) {
+    const lock = path.join(r.path, '.git', 'index.lock');
+    try { if (fs.existsSync(lock)) fs.unlinkSync(lock); } catch (e) {}
+  }
 }
 
 async function defaultBranch(cwd) {
   const forced = cfg('mainBranch', '');
   if (forced) return forced;
+  if (defaultBranchCache.has(cwd)) return defaultBranchCache.get(cwd);
+  let branch;
   const r = await git(cwd, ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD']);
-  if (r.code === 0 && r.out) return r.out.replace(/^origin\//, '');
-  const m = await git(cwd, ['rev-parse', '--verify', '--quiet', 'origin/main']);
-  return (m.code === 0) ? 'main' : 'master';
+  if (r.code === 0 && r.out) branch = r.out.replace(/^origin\//, '');
+  else {
+    const m = await git(cwd, ['rev-parse', '--verify', '--quiet', 'origin/main']);
+    branch = (m.code === 0) ? 'main' : 'master';
+  }
+  defaultBranchCache.set(cwd, branch);
+  return branch;
 }
 
 function findProject(name) { return getProjects().find(p => p.name === name); }
@@ -452,6 +474,9 @@ async function sendStatus(projectName) {
   post({ type: 'status', project: projectName, repos, branches, current, mainBranch, hint: assistantHint(proj.name, results) });
 }
 
+// Escapa texto (nombres de rama/repo, que git permite con < > & ") antes de meterlo en HTML.
+function htmlEsc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
 // Mensaje proactivo de la mascota-asistente segun el estado agregado.
 // El orden importa: los casos "trampa" (donde Push seria un error) van PRIMERO.
 function assistantHint(projName, results) {
@@ -461,7 +486,7 @@ function assistantHint(projName, results) {
   const noUp = results.filter(r => r.hasRemote && !r.hasUp);
 
   if (noRemote.length) {
-    const n = noRemote.map(r => r.name).join(', ');
+    const n = noRemote.map(r => htmlEsc(r.name)).join(', ');
     return `&#9888; ${n} no est&aacute; conectado a un remoto. Con&eacute;ctalo: <span class="mono">git remote add origin &lt;url&gt;</span> y luego Push.`;
   }
   if (dirty > 0) return `Tienes <b>${dirty} cambio(s) sin commitear</b> &#9749; &mdash; escribe un mensaje (o dale &#10024;) y Commit.`;
@@ -471,8 +496,8 @@ function assistantHint(projName, results) {
   // no trabajo tuyo pendiente. Push aqui reviviria una rama muerta -> mejor ir a main.
   const phantom = results.filter(r => r.phantomAhead);
   if (phantom.length) {
-    const r = phantom[0];
-    return `Est&aacute;s en <b>${r.branch}</b> con <b>${r.ahead} &laquo;commit(s) sin pushear&raquo;</b>, pero esos commits <b>ya est&aacute;n en el servidor dentro de <span class="mono">${r.main}</span></b>. &laquo;ahead&raquo; compara punteros, no mide tu trabajo: es una etiqueta vieja apuntando atr&aacute;s. <b>No hagas Push.</b> Dale <b>&#8962; Ir a ${r.main}</b>.`;
+    const r = phantom[0]; const rb = htmlEsc(r.branch), rm = htmlEsc(r.main);
+    return `Est&aacute;s en <b>${rb}</b> con <b>${r.ahead} &laquo;commit(s) sin pushear&raquo;</b>, pero esos commits <b>ya est&aacute;n en el servidor dentro de <span class="mono">${rm}</span></b>. &laquo;ahead&raquo; compara punteros, no mide tu trabajo: es una etiqueta vieja apuntando atr&aacute;s. <b>No hagas Push.</b> Dale <b>&#8962; Ir a ${rm}</b>.`;
   }
 
   // ahead REAL: hay commits tuyos que main todavia no tiene -> Push si tiene sentido.
@@ -483,7 +508,7 @@ function assistantHint(projName, results) {
   const linkNeeded = noUp.filter(r => r.remoteHasBranch);
   if (linkNeeded.length) {
     const r = linkNeeded[0];
-    return `Tu rama <b>ya existe en GitHub</b> pero no est&aacute; enlazada (por eso VS Code dice &laquo;Publish Branch&raquo;). Enl&aacute;zala: <span class="mono">git branch --set-upstream-to=origin/${r.branch}</span> y luego <b>Pull</b>. No uses Publish.`;
+    return `Tu rama <b>ya existe en GitHub</b> pero no est&aacute; enlazada (por eso VS Code dice &laquo;Publish Branch&raquo;). Enl&aacute;zala: <span class="mono">git branch --set-upstream-to=origin/${htmlEsc(r.branch)}</span> y luego <b>Pull</b>. No uses Publish.`;
   }
   if (noUp.length) return `Tu rama es <b>nueva</b> (no est&aacute; en el remoto) &#8593; &mdash; dale <b>Push</b> y la creo en GitHub.`;
   if (behind > 0) return `Hay <b>${behind} commit(s) nuevo(s)</b> en el remoto &#8595; &mdash; dale <b>Pull</b>.`;
@@ -491,8 +516,8 @@ function assistantHint(projName, results) {
   // rama limpia y ya fusionada en main: su trabajo ya vive en main. Volver a main es higiene.
   const merged = results.filter(r => r.mergedInMain && !r.onMain);
   if (merged.length) {
-    const r = merged[0];
-    return `<b>${r.branch}</b> ya est&aacute; <b>fusionada en <span class="mono">${r.main}</span></b>: su trabajo ya vive ah&iacute;. Puedes volver con <b>&#8962; Ir a ${r.main}</b> sin perder nada.`;
+    const r = merged[0]; const rb = htmlEsc(r.branch), rm = htmlEsc(r.main);
+    return `<b>${rb}</b> ya est&aacute; <b>fusionada en <span class="mono">${rm}</span></b>: su trabajo ya vive ah&iacute;. Puedes volver con <b>&#8962; Ir a ${rm}</b> sin perder nada.`;
   }
   return `Todo al d&iacute;a &#10024; &iquest;un cafecito? &#9749;`;
 }
@@ -586,6 +611,7 @@ async function runMain(kind, projectName, repoNames) {
       }
     }
   }
+  if (opCancelled) cleanupLocks(repos);
   post({ type: 'log', level: 'hdr', text: opCancelled ? '>> Operacion cancelada'
     : kind === 'check'
     ? (pending > 0 ? `>> ${pending} commit(s) pendientes de pull` : '>> Todo al dia')
@@ -597,6 +623,23 @@ async function runMain(kind, projectName, repoNames) {
 // ---------------------------------------------------------------------------
 //  COMMIT (add -A + commit) en cada repo con cambios
 // ---------------------------------------------------------------------------
+// Comprueba que git tenga nombre+email para commitear; si falta, ofrece configurarlo (global).
+async function ensureGitIdentity(cwd) {
+  const name = (await git(cwd, ['config', 'user.name'])).out;
+  const email = (await git(cwd, ['config', 'user.email'])).out;
+  if (name && email) return true;
+  const pick = await vscode.window.showWarningMessage(
+    'Git no tiene configurado tu nombre/email para commitear.', 'Configurar', 'Cancelar');
+  if (pick !== 'Configurar') return false;
+  const n = await vscode.window.showInputBox({ prompt: 'Tu nombre para git (user.name)', value: name || '', ignoreFocusOut: true });
+  if (!n || !n.trim()) return false;
+  const e = await vscode.window.showInputBox({ prompt: 'Tu email para git (user.email)', value: email || '', ignoreFocusOut: true });
+  if (!e || !e.trim()) return false;
+  await git(cwd, ['config', '--global', 'user.name', n.trim()]);
+  await git(cwd, ['config', '--global', 'user.email', e.trim()]);
+  return true;
+}
+
 async function commitAction(projectName, message, repoNames) {
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'log', level: 'err', text: 'Proyecto no encontrado' }); post({ type: 'done' }); return; }
@@ -604,6 +647,12 @@ async function commitAction(projectName, message, repoNames) {
   const repos = filterRepos(proj, repoNames);
   post({ type: 'busy' });
   post({ type: 'log', level: 'hdr', text: `== COMMIT :: ${proj.name} ==` });
+
+  // git no puede commitear sin user.name / user.email configurados: detectalo antes y ofrece arreglarlo
+  if (repos.length && !(await ensureGitIdentity(repos[0].path))) {
+    post({ type: 'log', level: 'err', text: 'Commit cancelado: falta configurar user.name / user.email en git.' });
+    post({ type: 'done' }); return;
+  }
 
   let done = 0;
   for (const repo of repos) {
@@ -618,6 +667,7 @@ async function commitAction(projectName, message, repoNames) {
     done++;
     post({ type: 'log', level: 'ok', text: `${tag}: commit hecho` });
   }
+  if (opCancelled) cleanupLocks(repos);
   post({ type: 'log', level: 'hdr', text: opCancelled ? '>> Operacion cancelada' : done > 0 ? `>> ${done} repo(s) commiteados. Ahora puedes Push.` : '>> No habia cambios para commitear' });
   post({ type: 'done' });
   await sendStatus(projectName);
@@ -707,6 +757,8 @@ async function suggestMessage(projectName, repoNames) {
   const changes = [];        // {code,path,add,del,kind,repo}
   let convStyle = false;     // el repo usa conventional commits?
   let fixSignal = false, featSignal = false;
+  let diffText = '';         // muestra del diff acumulada para el modelo de IA
+  const DIFF_CAP = 12000;
   const multiRepo = repos.length > 1;
 
   for (const repo of repos) {
@@ -729,6 +781,10 @@ async function suggestMessage(projectName, repoNames) {
     // muestra del contenido para detectar fix/feat
     const diff = await git(repo.path, ['diff', 'HEAD', '--unified=0']);
     const dsample = (diff.out || '').slice(0, 20000);
+    if (diffText.length < DIFF_CAP) {
+      const hdr = multiRepo ? `# repo: ${repo.name}\n` : '';
+      diffText += hdr + (diff.out || '').slice(0, DIFF_CAP - diffText.length) + '\n';
+    }
     const addedLines = dsample.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++'));
     const addedText = addedLines.join('\n');
     if (/\b(fix|bug|error|catch|throw|corrige|arregla|hotfix|patch|npe|null|undefined check)\b/i.test(addedText)) fixSignal = true;
@@ -809,11 +865,67 @@ async function suggestMessage(projectName, repoNames) {
     });
   if (changes.length > 15) body.push(`- …y ${changes.length - 15} archivo(s) mas`);
 
-  const message = `${subjectLine}\n\n${body.join('\n')}`;
+  let message = `${subjectLine}\n\n${body.join('\n')}`;
 
-  post({ type: 'log', level: 'ok', text: `Sugerencia lista: ${changes.length} archivo(s), +${totalAdd} -${totalDel}` });
+  // --- intento con IA (VSCode Language Model API); si no hay modelo, queda la heuristica ---
+  let usedAi = false, aiModel = '';
+  if (!opCancelled) {
+    const fileSummary = changes.slice(0, 40).map(c => {
+      const k = c.kind === 'add' ? 'nuevo' : c.kind === 'del' ? 'eliminado' : c.kind === 'ren' ? 'renombrado' : 'modificado';
+      return `${k}: ${multiRepo ? c.repo + '/' : ''}${c.path} (+${c.add} -${c.del})`;
+    }).join('\n');
+    post({ type: 'log', level: 'dim', text: 'Consultando modelo de IA (si hay)…' });
+    const ai = await aiCommitMessage(fileSummary, diffText, { convStyle });
+    if (ai && ai.text) { message = ai.text; usedAi = true; aiModel = ai.model; }
+  }
+
+  post({ type: 'log', level: 'ok', text: usedAi
+    ? `Sugerencia con IA (${aiModel}): ${changes.length} archivo(s), +${totalAdd} -${totalDel}`
+    : `Sugerencia lista: ${changes.length} archivo(s), +${totalAdd} -${totalDel}` });
   post({ type: 'suggest', message });
   post({ type: 'done' });
+}
+
+// Genera un mensaje de commit con el modelo de IA del editor (VSCode Language Model API).
+// Requiere que el usuario tenga un proveedor de chat instalado (Copilot, Claude, etc.). Si no
+// hay modelo o algo falla, devuelve null y el llamador usa la sugerencia heuristica (offline).
+async function aiCommitMessage(fileSummary, diffText, opts) {
+  try {
+    if (!vscode.lm || typeof vscode.lm.selectChatModels !== 'function') return null;
+    const models = await vscode.lm.selectChatModels();
+    if (!models || !models.length) return null;
+    const model = models[0];
+    const style = opts.convStyle
+      ? 'Usa Conventional Commits: "tipo(scope): asunto" con tipos feat, fix, docs, style, refactor, perf, test o chore.'
+      : 'Escribe el asunto en imperativo, sin prefijo de tipo.';
+    const prompt = [
+      'Eres un asistente que redacta mensajes de commit claros en espanol.',
+      'A partir del resumen de archivos y el diff, redacta UN mensaje de commit:',
+      '- Primera linea (asunto) de 72 caracteres o menos que describa QUE hace el cambio y por que, no solo que archivos toca.',
+      '- Una linea en blanco.',
+      '- Cuerpo con vinetas "- " (maximo 8) explicando los cambios relevantes.',
+      style,
+      'Responde SOLO con el mensaje de commit, sin comillas, sin explicaciones y sin bloques de codigo.',
+      '',
+      'ARCHIVOS:',
+      fileSummary || '(sin resumen)',
+      '',
+      'DIFF:',
+      diffText || '(sin diff)'
+    ].join('\n');
+    const cts = new vscode.CancellationTokenSource();
+    activeLmCancel = cts;
+    const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+    const resp = await model.sendRequest(messages, { justification: 'Brew genera un mensaje de commit a partir de tu diff.' }, cts.token);
+    let text = '';
+    for await (const part of resp.text) { if (opCancelled) break; text += part; }
+    activeLmCancel = null;
+    text = (text || '').trim().replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '').trim();
+    return text ? { text, model: model.name || model.family || 'IA' } : null;
+  } catch (e) {
+    activeLmCancel = null;
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -905,6 +1017,7 @@ function getHtml() {
 <html lang="es">
 <head>
 <meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <style>
   ${fontCss}
@@ -1173,6 +1286,7 @@ function getHtml() {
   function selectedRepoNames(){ return currentRepoNames.filter(n=>!deselected.has(n)); }
   function ensureSelection(){ if(currentRepoNames.length>1 && selectedRepoNames().length===0){ clearScreen(); line('Selecciona al menos un repo','err'); return false; } return true; }
 
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
   function line(text, level){ const d=document.createElement('div'); d.className=level||'info'; d.textContent=text;
     screen.appendChild(d); screen.scrollTop=screen.scrollHeight; }
   function clearScreen(){ screen.innerHTML=''; }
@@ -1229,7 +1343,7 @@ function getHtml() {
       else if(r.behind>0) state='st-warn';
       else if(r.ahead>0 && !r.phantomAhead) state='st-ahead';
       const row=document.createElement('div'); row.className='srow '+state+(hasFiles?' has':'');
-      const multi = repos.length>1 ? '<span class="repo">'+r.name+'</span>' : '';
+      const multi = repos.length>1 ? '<span class="repo">'+esc(r.name)+'</span>' : '';
       const caret = hasFiles ? '<span class="caret">&#9656;</span>' : '';
       let badges='';
       if(r.dirty>0) badges+='<span class="badge state b-dirty">'+r.dirty+' cambio'+(r.dirty>1?'s':'')+'</span>';
@@ -1239,7 +1353,7 @@ function getHtml() {
       if(r.behind>0) badges+=' <span class="badge b-dn">&#8595;'+r.behind+'</span>';
       if(r.mergedInMain && !r.onMain && r.dirty===0 && !r.phantomAhead && r.ahead===0) badges+=' <span class="badge b-merged" title="Su trabajo ya vive en main">fusionada</span>';
       if(r.hasRemote===false) badges+=' <span class="badge b-noremote">sin remoto</span>';
-      row.innerHTML='<span class="br"><span class="dot"></span><span class="ico">&#9095;</span>'+r.branch+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
+      row.innerHTML='<span class="br"><span class="dot"></span><span class="ico">&#9095;</span>'+esc(r.branch)+' '+multi+caret+'</span><span class="badges">'+badges+'</span>';
       // en proyectos multi-repo, checkbox para elegir a que repos aplicar Commit/Push/Pull/Check
       if(repos.length>1){
         const cb=document.createElement('input'); cb.type='checkbox'; cb.className='rsel';

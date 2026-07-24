@@ -2,7 +2,7 @@
   "name": "git-arcade",
   "displayName": "Brew",
   "description": "Brew: panel de git tipo cafeteria (check/pull/commit/push, rama, estado) para cualquier proyecto detectado.",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "publisher": "nikolas",
   "engines": {
     "vscode": "^1.75.0"

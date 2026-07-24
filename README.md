@@ -21,9 +21,9 @@ Brew es una **alternativa simplificada al Source Control** de VSCode: enfocada e
 |---|---|
 | **Check** ✓ | `git fetch --all --prune` y cuenta commits pendientes. No modifica nada. |
 | **Pull** ↓ | `git pull origin <rama> --no-rebase`. Omite repos con cambios sin commitear y aborta ante conflicto. |
-| **Commit** ● | `git add -A` + commit con tu mensaje. |
+| **Commit** ● | `git add -A` + commit con tu mensaje. Si git no tiene `user.name`/`user.email`, te ofrece configurarlos antes. |
 | **Push** ↑ | `git push` (crea el upstream si falta). Detecta problemas de credenciales o remoto adelantado. |
-| **✨ Sugerir** | Analiza el diff y **propone un mensaje de commit** (tipo, scope y viñetas por archivo; respeta Conventional Commits si el repo ya los usa). |
+| **✨ Sugerir** | Analiza el diff y **propone un mensaje de commit**. Usa el **modelo de IA del editor** (VSCode Language Model API — Copilot, Claude, etc.) si tienes uno instalado; si no, cae a un generador heurístico offline (tipo, scope y viñetas por archivo; respeta Conventional Commits si el repo ya los usa). |
 | **+** | Crea una rama nueva en todos los repos del proyecto. |
 | **⌂ Ir a main** | Vuelve a la rama principal (solo aparece cuando estás fuera de ella y es seguro volver). |
 
