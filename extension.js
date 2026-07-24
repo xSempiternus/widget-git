@@ -1146,7 +1146,11 @@ function getHtml() {
 
   .header { display:flex; align-items:center; justify-content:space-between; }
   .brand { display:flex; align-items:center; gap:10px; }
-  .logo { width:34px; height:34px; flex:none; filter:drop-shadow(0 0 6px rgba(224,145,47,.4)); }
+  .logo { width:34px; height:34px; flex:none; filter:drop-shadow(0 0 6px rgba(224,145,47,.4)); cursor:pointer;
+    transition:transform .25s ease, filter .25s ease; }
+  .brand:hover .logo { transform:rotate(-8deg) scale(1.08); filter:drop-shadow(0 0 9px rgba(224,145,47,.75)); }
+  .logo.hi { animation:hop .6s ease; }
+  @keyframes hop { 0%,100%{transform:translateY(0) rotate(0);} 35%{transform:translateY(-5px) rotate(-10deg);} 65%{transform:translateY(0) rotate(6deg);} }
   .wordmark { font-family:var(--brand); font-weight:700; font-size:21px; letter-spacing:.015em; line-height:1; color:#f7ecd4;
     text-shadow:0 0 8px rgba(224,145,47,.6),0 0 18px rgba(224,145,47,.3); animation:flick 4s infinite; }
   @keyframes flick { 0%,96%,100%{opacity:1;} 98%{opacity:.85;} }
@@ -1294,10 +1298,40 @@ function getHtml() {
   /* burbuja mascota + feedback */
   .bubble { display:flex; gap:10px; background:var(--surfC); border:1px solid var(--bd4); border-left:3px solid var(--amber);
     border-radius:12px; padding:11px 12px; }
-  .bot { width:44px; height:44px; flex:none; align-self:flex-start; animation:bob 3.4s ease-in-out infinite; transform-origin:60% 90%; }
-  @keyframes bob { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-2px);} }
+  .bot { position:relative; width:44px; height:44px; flex:none; align-self:flex-start; cursor:pointer;
+    animation:idle 6s ease-in-out infinite; transform-origin:60% 90%; transition:filter .2s ease; }
+  .bot:hover { filter:drop-shadow(0 0 7px rgba(224,145,47,.7)); }
+  /* idle con vida: vaiven suave + un ladeo curioso cada ciclo */
+  @keyframes idle {
+    0%,58%,100% { transform:translateY(0) rotate(0); }
+    14% { transform:translateY(-2px) rotate(0); }
+    30% { transform:translateY(0) rotate(0); }
+    70% { transform:translateY(0) rotate(-5deg); }
+    80% { transform:translateY(-1px) rotate(4deg); }
+    90% { transform:translateY(0) rotate(0); }
+  }
+  /* vapor de cafe subiendo (mas rapido cuando trabaja) */
+  .bot::before, .bot::after { content:""; position:absolute; top:-5px; width:4px; height:9px; border-radius:60%;
+    background:linear-gradient(rgba(240,226,204,.55), rgba(240,226,204,0)); filter:blur(1px); opacity:0; pointer-events:none; }
+  .bot::before { left:13px; animation:steam 2.9s ease-in-out infinite; }
+  .bot::after  { left:24px; animation:steam 2.9s ease-in-out .95s infinite; }
+  @keyframes steam { 0%{opacity:0; transform:translateY(3px) scaleX(1);} 30%{opacity:.75;} 100%{opacity:0; transform:translateY(-10px) scaleX(1.7);} }
   .bot.working { animation:work .5s ease-in-out infinite; filter:drop-shadow(0 0 6px rgba(224,145,47,.6)); }
+  .bot.working::before, .bot.working::after { animation-duration:1.3s; }
   @keyframes work { 0%{transform:translateY(0) rotate(-5deg);} 50%{transform:translateY(-3px) rotate(5deg);} 100%{transform:translateY(0) rotate(-5deg);} }
+  /* reaccion feliz (exito / clic) */
+  .bot.happy { animation:happy .7s ease; }
+  @keyframes happy {
+    0%{transform:translateY(0) scale(1) rotate(0);}
+    28%{transform:translateY(-8px) scale(1.07) rotate(-7deg);}
+    52%{transform:translateY(0) scale(.97) rotate(5deg);}
+    74%{transform:translateY(-3px) rotate(-3deg);}
+    100%{transform:translateY(0) scale(1) rotate(0);}
+  }
+  /* reaccion de error (temblorcito) */
+  .bot.oops { animation:oops .55s ease; filter:drop-shadow(0 0 6px rgba(207,107,66,.6)); }
+  @keyframes oops { 0%,100%{transform:translateX(0) rotate(0);} 18%{transform:translateX(-4px) rotate(-5deg);}
+    38%{transform:translateX(4px) rotate(5deg);} 58%{transform:translateX(-3px) rotate(-3deg);} 78%{transform:translateX(2px) rotate(2deg);} }
   .screen { flex:1; min-width:0; max-height:90px; overflow-y:auto; font-family:var(--sans); font-size:12.5px; line-height:1.45; color:var(--txt2); }
   .screen div { white-space:pre-wrap; word-break:break-word; }
   .screen .greet b, .info b { color:var(--amber); }
@@ -1408,8 +1442,34 @@ function getHtml() {
   function clearScreen(){ screen.innerHTML=''; }
   function setHint(html){ screen.innerHTML='<div class="greet">'+html+'</div>'; }
   function autogrow(){ msg.style.height='auto'; msg.style.height=Math.min(msg.scrollHeight,170)+'px'; }
-  function setBusy(b){ ['check','pull','commit','push','suggest'].forEach(id=>{ const el=$(id); if(el) el.disabled=b; }); sel.disabled=b;
-    const bot=$('bot'); if(bot) bot.classList.toggle('working',b);
+
+  // --- personalidad de la mascota ---
+  const PHRASES = {
+    hi: [
+      'Buenas &#9749; &iquest;en qu&eacute; <b>repo</b> andamos hoy?',
+      '&iexcl;Hola! Ponme un <b>proyecto</b> y te cuento c&oacute;mo va &#9749;',
+      'Listo para el caf&eacute;&hellip; digo, para el <b>git</b> &#9749;',
+      '&iquest;Un cafecito mientras revisamos tus <b>ramas</b>? &#9749;'
+    ],
+    happy: [
+      '&iexcl;Reci&eacute;n hecho! &#9749;',
+      '&iexcl;Servido! &#10024;',
+      'Suave como un buen latte &#9749;',
+      '&iexcl;Ese commit huele a gloria! &#10024;',
+      '&iexcl;Listo, sin derramar una gota! &#9749;'
+    ],
+    oops: [
+      'Uy&hellip; se me derram&oacute; el caf&eacute; &#9749;',
+      'Ups, algo no cuaj&oacute;. Probemos otra vez.',
+      'Mmm, se me atragant&oacute; el sorbo &#9749;'
+    ]
+  };
+  function pick(a){ return a[(Math.random()*a.length)|0]; }
+  // dispara una reaccion breve (happy / oops) reiniciando la animacion
+  function mascot(state){ const b=$('bot'); if(!b) return; b.classList.remove('happy','oops'); void b.offsetWidth; b.classList.add(state); setTimeout(()=>b.classList.remove(state), 900); }
+  let busy=false;
+  function setBusy(b){ busy=b; ['check','pull','commit','push','suggest'].forEach(id=>{ const el=$(id); if(el) el.disabled=b; }); sel.disabled=b;
+    const bot=$('bot'); if(bot){ bot.classList.toggle('working',b); if(b) bot.classList.remove('happy','oops'); }
     const cb=$('cancel'); if(cb) cb.classList.toggle('show',b);
     if(b){ clearDone(); opHadError=false; } }
   // limpia el visto verde de todos los botones de accion
@@ -1538,13 +1598,21 @@ function getHtml() {
       requestStatus();
     } else if(m.type==='select'){ if(m.project && projects.some(p=>p.name===m.project) && sel.value!==m.project){ sel.value=m.project; requestStatus(); }
     } else if(m.type==='status'){ renderStatus(m.project, m.repos, m.branches, m.current, m.hint, m.mainBranch);
-    } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700);
+    } else if(m.type==='suggest'){ msg.value=m.message; autogrow(); msg.focus(); msg.classList.add('flash'); setTimeout(()=>msg.classList.remove('flash'),700); mascot('happy');
     } else if(m.type==='busy'){ setBusy(true);
-    } else if(m.type==='done'){ setBusy(false); markDone();
+    } else if(m.type==='done'){ setBusy(false); markDone(); if(!opHadError) mascot('happy');
     } else if(m.type==='background'){ applyBackground(m.uri, m.opacity);
-    } else if(m.type==='log'){ if(m.level==='err') opHadError=true; line(m.text, m.level); }
+    } else if(m.type==='log'){ if(m.level==='err'){ opHadError=true; mascot('oops'); } line(m.text, m.level); }
   });
 
+  // clic en la mascota = un mimo: reacciona feliz y suelta una frase (si no esta ocupada)
+  $('bot').addEventListener('click', ()=>{ mascot('happy'); if(!busy) setHint(pick(PHRASES.happy)); });
+  // clic en el logo de la cabecera: saltito
+  const brand=document.querySelector('.brand');
+  if(brand) brand.addEventListener('click', ()=>{ const l=document.querySelector('.logo'); if(l){ l.classList.remove('hi'); void l.offsetWidth; l.classList.add('hi'); setTimeout(()=>l.classList.remove('hi'),650); } });
+
+  // saludo inicial variado (antes de que se elija un proyecto)
+  setHint(pick(PHRASES.hi));
   vscode.postMessage({cmd:'ready'});
 </script>
 </body>
