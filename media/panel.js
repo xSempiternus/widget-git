@@ -145,17 +145,19 @@
   $('popout').addEventListener('click', ()=>vscode.postMessage({cmd:'popout'}));
 
   // --- fondo del panel (imagen + intensidad) ---
+  // rellena la pista del slider segun su valor (0..max) para el look moderno
+  function bgFill(){ const r=$('bgrange'); const max=parseInt(r.max,10)||50; const pct=(parseInt(r.value,10)||0)/max*100; r.style.setProperty('--fill', pct.toFixed(1)+'%'); }
   function applyBackground(uri, opacity){
     const root=document.documentElement;
     if(uri) root.style.setProperty('--bgimg','url("'+uri+'")');
     if(typeof opacity==='number'){
       const v=Math.max(0.3, Math.min(0.97, 1-opacity)); root.style.setProperty('--veil', v.toFixed(3));
-      const pct=Math.round(opacity*100); $('bgrange').value=pct; $('bgval').textContent=pct+'%';
+      const pct=Math.round(opacity*100); $('bgrange').value=pct; $('bgval').textContent=pct+'%'; bgFill();
     }
   }
   $('setbg').addEventListener('click', (e)=>{ e.stopPropagation(); $('bgpop').classList.toggle('show'); });
   document.addEventListener('click', (e)=>{ const p=$('bgpop'); if(p.classList.contains('show') && !p.contains(e.target) && e.target!==$('setbg') && !$('setbg').contains(e.target)) p.classList.remove('show'); });
-  $('bgrange').addEventListener('input', ()=>{ const pct=parseInt($('bgrange').value,10)||0; $('bgval').textContent=pct+'%'; const v=Math.max(0.3,Math.min(0.97,1-pct/100)); document.documentElement.style.setProperty('--veil', v.toFixed(3)); });
+  $('bgrange').addEventListener('input', ()=>{ const pct=parseInt($('bgrange').value,10)||0; $('bgval').textContent=pct+'%'; bgFill(); const v=Math.max(0.3,Math.min(0.97,1-pct/100)); document.documentElement.style.setProperty('--veil', v.toFixed(3)); });
   $('bgrange').addEventListener('change', ()=>{ const pct=parseInt($('bgrange').value,10)||0; vscode.postMessage({cmd:'bgOpacity', value:pct/100}); });
   $('bgpick').addEventListener('click', ()=>vscode.postMessage({cmd:'bgImage'}));
   $('bgreset').addEventListener('click', ()=>vscode.postMessage({cmd:'bgReset'}));
