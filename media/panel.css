@@ -63,9 +63,21 @@ body::before {
   padding:13px; box-shadow:0 12px 30px -8px rgba(0,0,0,.8); }
 .bgpop.show { display:flex; }
 .bgpop .bgtitle { font-family:var(--mono); font-size:10px; font-weight:600; letter-spacing:var(--track); text-transform:uppercase; color:var(--lab); }
-.bgpop .bgrow { display:flex; align-items:center; gap:8px; }
-.bgpop .bgval { font-family:var(--mono); font-size:11px; color:var(--acc); min-width:34px; text-align:right; }
-.bgpop input[type=range] { flex:1; accent-color:var(--amber); cursor:pointer; }
+.bgpop .bgrow { display:flex; align-items:center; gap:10px; }
+.bgpop .bgval { font-family:var(--mono); font-size:11px; font-weight:600; color:#2a1503; min-width:40px; text-align:center;
+  background:var(--grad); border-radius:20px; padding:3px 7px; box-shadow:0 1px 3px rgba(0,0,0,.35); }
+/* --- slider moderno (café), pista rellena + pulgar con brillo --- */
+.bgpop input[type=range] { -webkit-appearance:none; appearance:none; flex:1; height:20px; background:transparent; cursor:pointer; margin:0; }
+.bgpop input[type=range]::-webkit-slider-runnable-track { height:7px; border-radius:20px;
+  background:linear-gradient(90deg, var(--amber) 0%, #e6982f var(--fill,20%), rgba(240,226,204,.12) var(--fill,20%), rgba(240,226,204,.12) 100%);
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.45); }
+.bgpop input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; appearance:none; width:17px; height:17px; margin-top:-5px; border-radius:50%;
+  background:radial-gradient(circle at 34% 30%, #ffd591, var(--amber) 58%, #c8781f); border:2px solid #2a1503;
+  box-shadow:0 1px 4px rgba(0,0,0,.55), 0 0 8px -2px rgba(224,145,47,.85); transition:transform .12s ease, box-shadow .2s ease; }
+.bgpop input[type=range]:hover::-webkit-slider-thumb { transform:scale(1.14); box-shadow:0 1px 7px rgba(0,0,0,.6), 0 0 13px -2px rgba(224,145,47,1); }
+.bgpop input[type=range]:active::-webkit-slider-thumb { transform:scale(1.04); }
+.bgpop input[type=range]:focus { outline:none; }
+.bgpop input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow:0 0 0 3px rgba(224,145,47,.35), 0 1px 4px rgba(0,0,0,.55); }
 .bgpop .bgbtns { display:flex; gap:8px; }
 .bgpop .bgb { flex:1; border:1px solid var(--bd2); border-radius:9px; background:var(--surfA); color:var(--acc);
   font-family:var(--mono); font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; padding:8px 6px; cursor:pointer;
