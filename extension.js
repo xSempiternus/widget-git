@@ -3,7 +3,7 @@ const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType } = require('./lib/logic');
+const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType, stripNoiseFromDiff, pickChatModel, normalizeCommitMessage } = require('./lib/logic');
 
 const BREW_SCHEME = 'brew-git';   // esquema virtual para mostrar la version en HEAD dentro del diff
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
@@ -854,6 +854,7 @@ async function suggestMessage(projectName, repoNames) {
   let convStyle = false;     // el repo usa conventional commits?
   let fixSignal = false, featSignal = false;
   let diffText = '';         // muestra del diff acumulada para el modelo de IA
+  const recentSubjects = []; // asuntos de commits recientes -> anclan estilo/idioma de la IA
   const DIFF_CAP = 12000;
   const multiRepo = repos.length > 1;
 
@@ -873,13 +874,17 @@ async function suggestMessage(projectName, repoNames) {
     // estilo del historial reciente
     const lg = await git(repo.path, ['log', '-10', '--format=%s']);
     if (/^(feat|fix|docs|chore|refactor|style|test|build|perf)(\(|:|!)/mi.test(lg.out || '')) convStyle = true;
+    (lg.out || '').split('\n').map(s => s.trim()).filter(Boolean)
+      .filter(s => !/^Merge /i.test(s)).forEach(s => { if (recentSubjects.length < 6) recentSubjects.push(s); });
 
     // muestra del contenido para detectar fix/feat
     const diff = await git(repo.path, ['diff', 'HEAD', '--unified=0']);
     const dsample = (diff.out || '').slice(0, 20000);
     if (diffText.length < DIFF_CAP) {
+      // filtra lockfiles/generados: su diff no aporta intencion y se come el presupuesto del modelo
+      const clean = stripNoiseFromDiff(diff.out || '');
       const hdr = multiRepo ? `# repo: ${repo.name}\n` : '';
-      diffText += hdr + (diff.out || '').slice(0, DIFF_CAP - diffText.length) + '\n';
+      diffText += hdr + clean.slice(0, DIFF_CAP - diffText.length) + '\n';
     }
     const addedLines = dsample.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++'));
     const addedText = addedLines.join('\n');
@@ -957,7 +962,7 @@ async function suggestMessage(projectName, repoNames) {
       return `${k}: ${multiRepo ? c.repo + '/' : ''}${c.path} (+${c.add} -${c.del})`;
     }).join('\n');
     post({ type: 'log', level: 'dim', text: 'Consultando modelo de IA (si hay)…' });
-    const ai = await aiCommitMessage(fileSummary, diffText, { convStyle });
+    const ai = await aiCommitMessage(fileSummary, diffText, { convStyle, type, scope, recentSubjects });
     if (ai && ai.text) { message = ai.text; usedAi = true; aiModel = ai.model; }
   }
 
@@ -972,39 +977,50 @@ async function suggestMessage(projectName, repoNames) {
 // Requiere que el usuario tenga un proveedor de chat instalado (Copilot, Claude, etc.). Si no
 // hay modelo o algo falla, devuelve null y el llamador usa la sugerencia heuristica (offline).
 async function aiCommitMessage(fileSummary, diffText, opts) {
+  opts = opts || {};
+  let timer = null;
   try {
     if (!vscode.lm || typeof vscode.lm.selectChatModels !== 'function') return null;
     const models = await vscode.lm.selectChatModels();
-    if (!models || !models.length) return null;
-    const model = models[0];
+    const model = pickChatModel(models);
+    if (!model) return null;
     const style = opts.convStyle
-      ? 'Usa Conventional Commits: "tipo(scope): asunto" con tipos feat, fix, docs, style, refactor, perf, test o chore.'
+      ? `Usa Conventional Commits: "tipo(scope): asunto" con tipos feat, fix, docs, style, refactor, perf, test o chore. Por los cambios, el tipo probable es "${opts.type || 'refactor'}"${opts.scope ? ` y el scope "${opts.scope}"` : ''} (ajustalo si el diff lo contradice).`
       : 'Escribe el asunto en imperativo, sin prefijo de tipo.';
+    const examples = (opts.recentSubjects && opts.recentSubjects.length)
+      ? ['', 'ESTILO (asuntos recientes del repo, imita su tono e idioma):', ...opts.recentSubjects.map(s => `- ${s}`)]
+      : ['', '(no hay historial: escribe en espanol)'];
     const prompt = [
-      'Eres un asistente que redacta mensajes de commit claros en espanol.',
-      'A partir del resumen de archivos y el diff, redacta UN mensaje de commit:',
-      '- Primera linea (asunto) de 72 caracteres o menos que describa QUE hace el cambio y por que, no solo que archivos toca.',
+      'Eres un asistente que redacta mensajes de commit claros y concisos.',
+      'A partir del resumen de archivos y el diff, redacta UN solo mensaje de commit:',
+      '- Primera linea (asunto) de 72 caracteres o menos, en imperativo, que describa QUE cambia y POR QUE (la intencion), no que archivos toca. Sin punto final.',
       '- Una linea en blanco.',
-      '- Cuerpo con vinetas "- " (maximo 8) explicando los cambios relevantes.',
+      '- Cuerpo con vinetas "- " (maximo 6) explicando los cambios relevantes y el motivo. Omite lo trivial.',
+      '- Escribe en el MISMO IDIOMA que los asuntos recientes del repo (si no hay, en espanol).',
+      '- Si el diff introduce un cambio incompatible, marcalo con "!" tras el tipo/scope y una linea "BREAKING CHANGE: ...".',
       style,
       'Responde SOLO con el mensaje de commit, sin comillas, sin explicaciones y sin bloques de codigo.',
+      ...examples,
       '',
       'ARCHIVOS:',
       fileSummary || '(sin resumen)',
       '',
-      'DIFF:',
+      'DIFF (puede venir recortado; lockfiles/generados excluidos):',
       diffText || '(sin diff)'
     ].join('\n');
     const cts = new vscode.CancellationTokenSource();
     activeLmCancel = cts;
+    timer = setTimeout(() => { try { cts.cancel(); } catch (e) {} }, 25000); // no cuelgues el panel si el modelo tarda
     const messages = [vscode.LanguageModelChatMessage.User(prompt)];
     const resp = await model.sendRequest(messages, { justification: 'Brew genera un mensaje de commit a partir de tu diff.' }, cts.token);
     let text = '';
     for await (const part of resp.text) { if (opCancelled) break; text += part; }
+    clearTimeout(timer); timer = null;
     activeLmCancel = null;
-    text = (text || '').trim().replace(/^```[a-z]*\s*/i, '').replace(/\s*```$/, '').trim();
+    text = normalizeCommitMessage(text, { convStyle: opts.convStyle, type: opts.type, scope: opts.scope });
     return text ? { text, model: model.name || model.family || 'IA' } : null;
   } catch (e) {
+    if (timer) clearTimeout(timer);
     activeLmCancel = null;
     return null;
   }

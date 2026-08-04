@@ -120,3 +120,60 @@ test('assistantHint: escapa nombres de rama con HTML', () => {
   assert.match(h, /&lt;script&gt;/);
   assert.ok(!h.includes('<script>'));
 });
+
+// --- helpers de la sugerencia con IA ---
+
+test('isNoise detecta lockfiles y generados', () => {
+  assert.ok(L.isNoise('package-lock.json'));
+  assert.ok(L.isNoise('sub/yarn.lock'));
+  assert.ok(L.isNoise('dist/bundle.js'));
+  assert.ok(L.isNoise('media/app.min.css'));
+  assert.ok(L.isNoise('build/app.js.map'));
+  assert.ok(!L.isNoise('src/index.js'));
+});
+
+test('stripNoiseFromDiff quita solo los bloques ruido', () => {
+  const diff = [
+    'diff --git a/src/app.js b/src/app.js',
+    '@@ -1 +1 @@',
+    '-a',
+    '+b',
+    'diff --git a/package-lock.json b/package-lock.json',
+    '@@ -1 +1 @@',
+    '-x',
+    '+y',
+    ''
+  ].join('\n');
+  const out = L.stripNoiseFromDiff(diff);
+  assert.match(out, /src\/app\.js/);
+  assert.ok(!out.includes('package-lock.json'));
+  assert.strictEqual(L.stripNoiseFromDiff(''), '');
+});
+
+test('pickChatModel prefiere el modelo mas capaz', () => {
+  const models = [
+    { id: 'gpt-3.5-turbo', family: 'gpt-3.5' },
+    { id: 'gpt-4o', family: 'gpt-4o' },
+    { id: 'claude-3.5-sonnet', family: 'claude-3.5-sonnet' }
+  ];
+  assert.strictEqual(L.pickChatModel(models).id, 'gpt-4o'); // primero de rango alto gana el empate
+  assert.strictEqual(L.pickChatModel([]), null);
+  assert.strictEqual(L.pickChatModel(null), null);
+});
+
+test('normalizeCommitMessage limpia cercos, comillas y punto final', () => {
+  const raw = '```\n"Actualiza el panel."\n\n\n- ajusta css\n```';
+  const out = L.normalizeCommitMessage(raw, {});
+  assert.strictEqual(out, 'Actualiza el panel\n\n- ajusta css');
+});
+
+test('normalizeCommitMessage recorta asunto a 72 y antepone tipo/scope', () => {
+  const long = 'a'.repeat(100);
+  const out = L.normalizeCommitMessage(long, { convStyle: true, type: 'feat', scope: 'ui' });
+  const subject = out.split('\n')[0];
+  assert.ok(subject.length <= 72);
+  assert.match(subject, /^feat\(ui\): /);
+  // si ya trae prefijo, no lo duplica
+  const out2 = L.normalizeCommitMessage('fix(api): corrige token', { convStyle: true, type: 'feat', scope: 'ui' });
+  assert.strictEqual(out2, 'fix(api): corrige token');
+});
