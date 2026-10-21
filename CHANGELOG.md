@@ -4,6 +4,24 @@ Todos los cambios notables de este proyecto se documentan aquí.
 El formato sigue [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/)
 y el proyecto usa [Versionado Semántico](https://semver.org/lang/es/).
 
+## [2.7.0] - 2026-10-21
+
+### Añadido
+- **Sugerencia de commit más fina**: prioriza código sobre docs/config al recortar el diff,
+  detecta idioma y Conventional Commits del historial (ajustes `gitArcade.aiCommit`,
+  `gitArcade.commitLanguage`, `gitArcade.conventionalCommits`), describe y commitea solo lo
+  que está en stage si hay algo, y pide confirmación antes de pisar un mensaje escrito a mano.
+
+### Corregido
+- **Agrupación de proyectos**: las carpetas de categoría (`02_Clientes`, `03_Startups-Propios`)
+  ya no juntan repos sin relación en un solo proyecto.
+- Un repo solo en su carpeta aparece con su nombre (`BermGuard`) y no con el de la carpeta
+  (`deliryum-ai`); al elegirlo se abre el repo, no la carpeta padre.
+- Dos proyectos con el mismo nombre se desambiguan con la carpeta padre (`web (x)`), en vez
+  de que uno tape al otro.
+- La selección automática por carpeta del workspace corre solo al arrancar; cambiar de pestaña
+  ya no cambia de proyecto.
+
 ## [2.6.0] - 2026-07-24
 
 ### Añadido

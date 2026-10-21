@@ -3,7 +3,7 @@ const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType, assembleDiff, splitDiffFiles, detectLang, pickChatModel, normalizeCommitMessage } = require('./lib/logic');
+const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType, assembleDiff, splitDiffFiles, detectLang, pickChatModel, normalizeCommitMessage, groupRepos } = require('./lib/logic');
 
 const BREW_SCHEME = 'brew-git';   // esquema virtual para mostrar la version en HEAD dentro del diff
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
@@ -266,19 +266,7 @@ function scanRoots() {
   return { roots, rootsLower: roots.map(r => String(r).toLowerCase()), maxDepth };
 }
 
-// agrupa rutas de repos en proyectos (repos hermanos bajo una carpeta = un proyecto).
-function groupRepos(repoPaths, rootsLower) {
-  const seen = new Set(); const repos = [];
-  for (const p of repoPaths) { const k = p.toLowerCase(); if (!seen.has(k)) { seen.add(k); repos.push(p); } }
-  const groups = new Map();
-  for (const repoPath of repos) {
-    const parent = path.dirname(repoPath);
-    const key = rootsLower.includes(parent.toLowerCase()) ? repoPath : parent;
-    if (!groups.has(key)) groups.set(key, { name: path.basename(key), dir: key, repos: [] });
-    groups.get(key).repos.push({ name: path.basename(repoPath), path: repoPath });
-  }
-  return Array.from(groups.values()).sort((a, b) => a.name.localeCompare(b.name));
-}
+// La agrupacion de repos en proyectos vive en lib/logic.js (groupRepos), con tests.
 
 // Version SINCRONA (fallback): la usa cualquier llamador sincrono con la cache fria.
 function getProjects() {

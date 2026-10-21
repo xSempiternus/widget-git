@@ -197,3 +197,40 @@ test('normalizeCommitMessage recorta asunto a 72 y antepone tipo/scope', () => {
   const out2 = L.normalizeCommitMessage('fix(api): corrige token', { convStyle: true, type: 'feat', scope: 'ui' });
   assert.strictEqual(out2, 'fix(api): corrige token');
 });
+
+// Estructura real de Documents/PROJECTS (rutas posix para que el test corra en cualquier SO).
+test('groupRepos: categorias no agrupan, repo solo usa su nombre, Fidelya sigue agrupado', () => {
+  const P = require('path').posix;
+  const R = '/p';
+  const repos = [
+    '02_Clientes/agencia-ara', '02_Clientes/crm-joyas', '02_Clientes/facup-chile/web-nextjs',
+    '02_Clientes/facup-chile/reconocimiento-facial/Facial-Recognition',
+    '03_Startups-Propios/deliryum-ai/BermGuard', '03_Startups-Propios/ml-trader', '03_Startups-Propios/voice-cloning',
+    '04_Herramientas-Dev/git-arcade', '04_Herramientas-Dev/git-visualizer',
+    'Entropia/Fidelya/ERP_Financiero', 'Entropia/Fidelya/Fidelya-backend', 'Entropia/Fidelya/Fidelya-frontend',
+    'Entropia/Fidelya/ai/AURA Analytics',
+    'Entropia/Fidelya/fork_erp_financiero/fidelya-finance-backend', 'Entropia/Fidelya/fork_erp_financiero/fidelya-finance-frontend'
+  ].map(r => `${R}/${r}`);
+  const out = L.groupRepos(repos, [R], P);
+  const by = Object.fromEntries(out.map(x => [x.name, x.repos.map(r => r.name)]));
+
+  assert.deepStrictEqual(by['BermGuard'], ['BermGuard']);
+  assert.deepStrictEqual(by['ml-trader'], ['ml-trader']);
+  assert.deepStrictEqual(by['git-arcade'], ['git-arcade']);
+  assert.deepStrictEqual(by['web-nextjs'], ['web-nextjs']);
+  assert.deepStrictEqual(by['AURA Analytics'], ['AURA Analytics']);
+  assert.deepStrictEqual(by['Fidelya'], ['ERP_Financiero', 'Fidelya-backend', 'Fidelya-frontend']);
+  assert.deepStrictEqual(by['fork_erp_financiero'], ['fidelya-finance-backend', 'fidelya-finance-frontend']);
+  for (const n of ['02_Clientes', '03_Startups-Propios', '04_Herramientas-Dev', 'deliryum-ai']) assert.ok(!(n in by), n);
+  assert.strictEqual(out.find(x => x.name === 'BermGuard').dir, `${R}/03_Startups-Propios/deliryum-ai/BermGuard`);
+});
+
+test('groupRepos: hermanos en carpeta normal se agrupan; raiz nunca agrupa; nombres repetidos se desambiguan', () => {
+  const P = require('path').posix;
+  const out = L.groupRepos(['/r/a', '/r/b', '/r/app/front', '/r/app/back', '/r/x/web', '/r/y/web', '/r/a'], ['/r'], P);
+  const names = out.map(x => x.name);
+  assert.ok(names.includes('a') && names.includes('b'));
+  assert.deepStrictEqual(out.find(x => x.name === 'app').repos.map(r => r.name), ['front', 'back']);
+  assert.ok(names.includes('web (x)') && names.includes('web (y)'));
+  assert.strictEqual(out.filter(x => x.name === 'a').length, 1);
+});

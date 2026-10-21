@@ -9,7 +9,7 @@ Brew es una **alternativa simplificada al Source Control** de VSCode: enfocada e
 ## Qué hace
 
 - **Auto-detecta proyectos** escaneando `gitArcade.rootPath` (y carpetas extra) en busca de repos `.git`.
-- **Agrupa por carpeta**: los repos hermanos (ej. `Fidelya-backend` + `Fidelya-frontend`) forman un mismo proyecto y las acciones se aplican a todos a la vez.
+- **Agrupa por carpeta**: los repos hermanos (ej. `Fidelya-backend` + `Fidelya-frontend`) forman un mismo proyecto y las acciones se aplican a todos a la vez. Las carpetas de categoría (las que empiezan con número, como `02_Clientes`, o las que mezclan repos con subcarpetas de otros proyectos) no agrupan: cada repo aparece con su propio nombre (`BermGuard`, no `deliryum-ai`).
 - **Estado por repo**: rama actual, ahead/behind vs. remoto, nº de cambios y lista desplegable de archivos modificados. **En vivo**: al guardar, crear o borrar archivos (desde VSCode o la terminal) el estado se refresca solo.
 - **Ver diff**: clic en cualquier archivo de la lista abre su diff nativo (HEAD ↔ tu versión) en el editor.
 - **Selección por repo**: en proyectos multi-repo, un checkbox por repo elige a cuáles aplicar Commit / Push / Pull / Check.
