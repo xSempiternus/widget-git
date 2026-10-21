@@ -5,7 +5,7 @@
   "version": "2.7.0",
   "publisher": "nikolas",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/xSempiternus/git-arcade.git" },
+  "repository": { "type": "git", "url": "https://github.com/xSempiternus/widget-git.git" },
   "engines": {
     "vscode": "^1.75.0"
   },
