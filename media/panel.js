@@ -137,7 +137,7 @@
   msg.addEventListener('input', autogrow);
   $('commit').addEventListener('click', ()=>{ if(!sel.value)return; if(!ensureSelection())return; if(!msg.value.trim()){ clearScreen(); line('Escribe un mensaje de commit','err'); msg.focus(); return; } clearScreen(); lastAction=$('commit'); vscode.postMessage({cmd:'commit', project:sel.value, message:msg.value.trim(), repos:selectedRepoNames()}); msg.value=''; autogrow(); });
   $('push').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); lastAction=$('push'); vscode.postMessage({cmd:'push', project:sel.value, repos:selectedRepoNames()}); });
-  $('suggest').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value, repos:selectedRepoNames()}); });
+  $('suggest').addEventListener('click', ()=>{ if(!sel.value||!ensureSelection())return; clearScreen(); line('Analizando cambios…','dim'); vscode.postMessage({cmd:'suggest', project:sel.value, repos:selectedRepoNames(), current:msg.value}); });
   $('cancel').addEventListener('click', ()=>{ line('Cancelando…','warn'); vscode.postMessage({cmd:'cancel'}); });
   function spin(el){ if(!el)return; el.classList.remove('spin'); void el.offsetWidth; el.classList.add('spin'); }
   $('rescan').addEventListener('click', ()=>{ spin($('rescan')); vscode.postMessage({cmd:'rescan'}); });

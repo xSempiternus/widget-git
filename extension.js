@@ -3,7 +3,7 @@ const cp = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType, stripNoiseFromDiff, pickChatModel, normalizeCommitMessage } = require('./lib/logic');
+const { htmlEsc, veilFor, baseName, topDir, briefList, cap, isTest, isDoc, isStyle, isConfig, assistantHint, commitType, assembleDiff, splitDiffFiles, detectLang, pickChatModel, normalizeCommitMessage } = require('./lib/logic');
 
 const BREW_SCHEME = 'brew-git';   // esquema virtual para mostrar la version en HEAD dentro del diff
 const targets = new Set();   // webviews vivos (vista fijada + ventana flotante)
@@ -17,6 +17,7 @@ let currentProject = null;   // proyecto seleccionado ahora mismo (para el auto-
 let headWatchers = [];       // fs.watch sobre cada .git para detectar cambios de rama externos
 let headDebounce = null;
 let suppressWatchUntil = 0;  // ignora eventos de watch provocados por nuestras propias operaciones
+let lastSuggestion = '';     // ultimo mensaje sugerido (para no pisar lo que el usuario haya escrito a mano)
 
 // ---------------------------------------------------------------------------
 //  Activacion
@@ -37,7 +38,7 @@ function activate(context) {
       wv.onDidReceiveMessage(onMessage);
       targets.add(wv);
       webviewView.onDidDispose(() => targets.delete(wv));
-      webviewView.onDidChangeVisibility(() => { if (webviewView.visible) { sendProjects(); autoSelect(); } });
+      webviewView.onDidChangeVisibility(() => { if (webviewView.visible) { sendProjects(); autoSelect(false); } });
     }
   };
   context.subscriptions.push(
@@ -67,8 +68,8 @@ function activate(context) {
   // --- Sincronizacion con VSCode ---
   // al cambiar el editor o las carpetas del workspace, auto-selecciona el proyecto que toca
   context.subscriptions.push(
-    vscode.window.onDidChangeActiveTextEditor(() => autoSelect()),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { invalidateCache(); refreshProjectsAsync().then(autoSelect); }),
+    vscode.window.onDidChangeActiveTextEditor(() => autoSelect(false)),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { invalidateCache(); refreshProjectsAsync().then(() => autoSelect(true)); }),
     // refresco en vivo del estado "sin commitear" al guardar/crear/borrar/renombrar archivos
     vscode.workspace.onDidSaveTextDocument(doc => onWorkspaceFileChange(doc.uri)),
     vscode.workspace.onDidCreateFiles(e => e.files.forEach(onWorkspaceFileChange)),
@@ -108,8 +109,8 @@ async function onMessage(msg) {
     if (['check', 'pull', 'commit', 'push', 'switch', 'newbranch', 'suggest'].includes(msg.cmd)) opCancelled = false;
     if (msg.cmd === 'switch' || msg.cmd === 'newbranch') suppressWatchUntil = Date.now() + 2500;
     switch (msg.cmd) {
-      case 'ready': sendProjects(); autoSelect(); sendBackground(); break;
-      case 'rescan': invalidateCache(); refreshProjectsAsync().then(autoSelect); break;
+      case 'ready': sendProjects(); autoSelect(true); sendBackground(); break;
+      case 'rescan': invalidateCache(); refreshProjectsAsync().then(() => autoSelect(true)); break;
       case 'setbg': await setBackgroundFlow(); break;
       case 'bgImage': await pickBackgroundImage(); break;
       case 'bgReset': await clearBackgroundFlow(); break;
@@ -119,7 +120,7 @@ async function onMessage(msg) {
       case 'check': await runMain('check', msg.project, msg.repos); break;
       case 'pull': await runMain('pull', msg.project, msg.repos); break;
       case 'commit': await commitAction(msg.project, msg.message, msg.repos); break;
-      case 'suggest': await suggestMessage(msg.project, msg.repos); break;
+      case 'suggest': await suggestMessage(msg.project, msg.repos, { current: msg.current }); break;
       case 'push': await pushAction(msg.project, msg.repos); break;
       case 'switch': await switchBranch(msg.project, msg.branch); break;
       case 'newbranch': await newBranch(msg.project); break;
@@ -447,32 +448,47 @@ function refreshVscodeGit() {
   try { vscode.commands.executeCommand('git.refresh'); } catch (e) {}
 }
 
-// Nombre del proyecto que corresponde a la carpeta/archivo activo en VSCode.
-function activeProjectName() {
-  const projects = getProjects();
-  const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
+const insidePath = (child, parent) => child === parent || child.startsWith(parent + path.sep);
+
+// Proyecto al que pertenece el ARCHIVO abierto ahora mismo. null si el editor activo no es un
+// archivo (webview, ajustes, output, un diff, el propio panel Brew…) o no cae en ningun proyecto.
+function projectFromActiveFile() {
   const active = vscode.window.activeTextEditor;
-  const activePath = active && active.document.uri.scheme === 'file' ? active.document.uri.fsPath.toLowerCase() : '';
-  const folders = (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath.toLowerCase());
-  // 1) por el archivo activo
-  if (activePath) {
-    for (const p of projects) {
-      if (inside(activePath, p.dir.toLowerCase())) return p.name;
-      for (const r of p.repos) if (inside(activePath, r.path.toLowerCase())) return p.name;
-    }
-  }
-  // 2) por la(s) carpeta(s) del workspace
-  for (const p of projects) {
-    const dl = p.dir.toLowerCase();
-    for (const f of folders) if (inside(f, dl) || inside(dl, f)) return p.name;
-    for (const r of p.repos) { const rl = r.path.toLowerCase(); for (const f of folders) if (inside(f, rl) || inside(rl, f)) return p.name; }
+  if (!active || active.document.uri.scheme !== 'file') return null;
+  const activePath = active.document.uri.fsPath.toLowerCase();
+  for (const p of getProjects()) {
+    if (insidePath(activePath, p.dir.toLowerCase())) return p.name;
+    for (const r of p.repos) if (insidePath(activePath, r.path.toLowerCase())) return p.name;
   }
   return null;
 }
 
-// Le dice al webview que seleccione el proyecto activo (NO abre carpeta: evita bucles).
-function autoSelect() {
-  const name = activeProjectName();
+// Proyecto sugerido por la(s) carpeta(s) del workspace. SOLO para la seleccion inicial: si la raiz
+// del workspace contiene varios proyectos (p.ej. abriste Documents/PROJECTS), esto termina eligiendo
+// el primero; por eso NO se usa de forma reactiva (haria "saltar" la seleccion al cambiar de pestana).
+function projectFromWorkspace() {
+  const projects = getProjects();
+  const folders = (vscode.workspace.workspaceFolders || []).map(f => f.uri.fsPath.toLowerCase());
+  if (!folders.length) return null;
+  // preferimos que la carpeta del workspace SEA (o este dentro de) un proyecto concreto...
+  for (const p of projects) {
+    if (folders.some(f => insidePath(f, p.dir.toLowerCase()))) return p.name;
+    for (const r of p.repos) if (folders.some(f => insidePath(f, r.path.toLowerCase()))) return p.name;
+  }
+  // ...y solo como ultimo recurso, un proyecto que cuelgue de la carpeta abierta (raiz que los contiene)
+  for (const p of projects) {
+    if (folders.some(f => insidePath(p.dir.toLowerCase(), f))) return p.name;
+    for (const r of p.repos) if (folders.some(f => insidePath(r.path.toLowerCase(), f))) return p.name;
+  }
+  return null;
+}
+
+// Le dice al webview que seleccione el proyecto del ARCHIVO activo (NO abre carpeta: evita bucles).
+// `allowInitialFallback` (arranque / cambio de workspace) permite adivinar por carpeta. De forma
+// reactiva (cambiar de pestana o ventana) NO caemos al fallback: si enfocas algo que no es un archivo
+// del proyecto, se mantiene la seleccion actual y no te cambia de proyecto mientras trabajas.
+function autoSelect(allowInitialFallback) {
+  const name = projectFromActiveFile() || (allowInitialFallback ? projectFromWorkspace() : null);
   if (name) post({ type: 'select', project: name });
 }
 
@@ -772,7 +788,11 @@ async function commitAction(projectName, message, repoNames) {
     const tag = `${repo.name} (${branch})`;
     const st = await git(repo.path, ['status', '--porcelain']);
     if (!st.out) { post({ type: 'log', level: 'dim', text: `${tag}: nada que commitear` }); continue; }
-    await git(repo.path, ['add', '-A']);
+    // Respeta un stage selectivo: si el usuario ya preparo archivos (git add), commitea SOLO eso.
+    // Si no hay nada en stage, incluimos todo (add -A) como atajo comodo.
+    const staged = (await git(repo.path, ['diff', '--cached', '--name-only'])).out;
+    if (!staged) await git(repo.path, ['add', '-A']);
+    else post({ type: 'log', level: 'dim', text: `${tag}: commiteando solo lo que preparaste en stage` });
     const c = await git(repo.path, ['commit', '-m', message]);
     if (c.code !== 0) { post({ type: 'log', level: 'err', text: `${tag}: fallo commit - ${(c.err || c.out).split('\n')[0]}` }); continue; }
     done++;
@@ -843,18 +863,30 @@ async function pushAction(projectName, repoNames) {
 //  SUGERIR mensaje de commit (analiza el diff real; genera asunto + cuerpo)
 //  (baseName/topDir/briefList/cap, los clasificadores y commitType estan en lib/logic.js)
 // ---------------------------------------------------------------------------
-async function suggestMessage(projectName, repoNames) {
+async function suggestMessage(projectName, repoNames, o) {
+  o = o || {};
   const proj = findProject(projectName);
   if (!proj) { post({ type: 'done' }); return; }
   const repos = filterRepos(proj, repoNames);
+
+  // No pisar lo que el usuario escribio a mano: si hay texto distinto al ultimo sugerido, confirma.
+  const typed = (o.current || '').trim();
+  if (typed && typed !== (lastSuggestion || '').trim()) {
+    const ok = await vscode.window.showWarningMessage(
+      'Ya escribiste un mensaje de commit. ¿Reemplazarlo con la sugerencia?',
+      { modal: true }, 'Reemplazar');
+    if (ok !== 'Reemplazar') { post({ type: 'log', level: 'dim', text: 'Sugerencia cancelada: conservas tu mensaje.' }); post({ type: 'done' }); return; }
+  }
+
   post({ type: 'busy' });
   post({ type: 'log', level: 'dim', text: 'Analizando diff…' });
 
   const changes = [];        // {code,path,add,del,kind,repo}
   let convStyle = false;     // el repo usa conventional commits?
   let fixSignal = false, featSignal = false;
-  let diffText = '';         // muestra del diff acumulada para el modelo de IA
+  const diffBlocks = [];     // {repo, path, text} por archivo -> se prioriza/recorta para la IA
   const recentSubjects = []; // asuntos de commits recientes -> anclan estilo/idioma de la IA
+  let stagedAny = false;     // algun repo trae cambios en stage? (define "que se commiteara")
   const DIFF_CAP = 12000;
   const multiRepo = repos.length > 1;
 
@@ -863,8 +895,16 @@ async function suggestMessage(projectName, repoNames) {
     const rows = (st.out || '').split('\n').filter(Boolean);
     if (!rows.length) continue;
 
-    // lineas +/- de lo ya trackeado (working tree vs HEAD)
-    const ns = await git(repo.path, ['diff', 'HEAD', '--numstat']);
+    // Si hay algo en el stage, el commit subira SOLO eso (commitAction no hace add -A). Para que el
+    // mensaje describa lo que de verdad se commiteara, analizamos el diff staged de ese repo.
+    const stagedRows = rows.filter(r => r[0] !== ' ' && r[0] !== '?');
+    const stagedOnly = stagedRows.length > 0;
+    if (stagedOnly) stagedAny = true;
+    const useRows = stagedOnly ? stagedRows : rows;
+    const diffBase = stagedOnly ? ['diff', '--cached'] : ['diff', 'HEAD'];
+
+    // lineas +/- de lo que se commiteara (staged) o de todo el working tree
+    const ns = await git(repo.path, [...diffBase, '--numstat']);
     const nmap = {};
     (ns.out || '').split('\n').filter(Boolean).forEach(l => {
       const t = l.split('\t'); const a = parseInt(t[0], 10) || 0; const d = parseInt(t[1], 10) || 0;
@@ -877,21 +917,16 @@ async function suggestMessage(projectName, repoNames) {
     (lg.out || '').split('\n').map(s => s.trim()).filter(Boolean)
       .filter(s => !/^Merge /i.test(s)).forEach(s => { if (recentSubjects.length < 6) recentSubjects.push(s); });
 
-    // muestra del contenido para detectar fix/feat
-    const diff = await git(repo.path, ['diff', 'HEAD', '--unified=0']);
+    // muestra del contenido: bloques por archivo (para la IA) + deteccion de fix/feat
+    const diff = await git(repo.path, [...diffBase, '--unified=0']);
+    splitDiffFiles(diff.out || '').forEach(b => diffBlocks.push({ repo: repo.name, path: b.path, text: b.text }));
     const dsample = (diff.out || '').slice(0, 20000);
-    if (diffText.length < DIFF_CAP) {
-      // filtra lockfiles/generados: su diff no aporta intencion y se come el presupuesto del modelo
-      const clean = stripNoiseFromDiff(diff.out || '');
-      const hdr = multiRepo ? `# repo: ${repo.name}\n` : '';
-      diffText += hdr + clean.slice(0, DIFF_CAP - diffText.length) + '\n';
-    }
     const addedLines = dsample.split('\n').filter(l => l.startsWith('+') && !l.startsWith('+++'));
     const addedText = addedLines.join('\n');
     if (/\b(fix|bug|error|catch|throw|corrige|arregla|hotfix|patch|npe|null|undefined check)\b/i.test(addedText)) fixSignal = true;
     if (/\b(export (default |const |function |class )|def |func |public (class|function)|add(s|ed)? )/i.test(addedText)) featSignal = true;
 
-    for (const row of rows) {
+    for (const row of useRows) {
       const code = row.slice(0, 2); let p = row.slice(3).replace(/^"|"$/g, '');
       const c = code.replace(/\s/g, '');
       let kind = 'mod';
@@ -911,6 +946,13 @@ async function suggestMessage(projectName, repoNames) {
     post({ type: 'done' });
     return;
   }
+  if (stagedAny) post({ type: 'log', level: 'dim', text: 'Hay cambios en stage: el mensaje describe solo lo que se commiteará.' });
+
+  // --- ajustes del usuario (Conventional Commits e idioma) ---
+  const conv = cfg('conventionalCommits', 'auto');
+  if (conv === 'always') convStyle = true; else if (conv === 'never') convStyle = false;
+  const langPref = cfg('commitLanguage', 'auto');
+  const lang = langPref === 'auto' ? detectLang(recentSubjects) : langPref;
 
   const added = changes.filter(c => c.kind === 'add');
   const modified = changes.filter(c => c.kind === 'mod');
@@ -939,36 +981,42 @@ async function suggestMessage(projectName, repoNames) {
   const head = convStyle ? `${type}${scope ? `(${scope})` : ''}: ${subject}` : cap(subject);
   let subjectLine = head.length > 72 ? head.slice(0, 69).trimEnd() + '...' : head;
 
-  // --- cuerpo con vinetas por archivo (ordenado por tamano de cambio) ---
-  const verbOf = { add: 'nuevo', del: 'eliminado', ren: 'renombrado', mod: '' };
-  const body = changes
-    .slice()
-    .sort((a, b) => (b.add + b.del) - (a.add + a.del))
-    .slice(0, 15)
-    .map(c => {
-      const stat = c.kind === 'add' ? `nuevo, +${c.add}` : c.kind === 'del' ? 'eliminado' : c.kind === 'ren' ? 'renombrado' : `+${c.add} -${c.del}`;
-      const label = multiRepo ? `${c.repo}/${c.path}` : c.path;
-      return `- ${label} (${stat})`;
-    });
-  if (changes.length > 15) body.push(`- …y ${changes.length - 15} archivo(s) mas`);
+  // --- cuerpo: resumen agrupado por accion (compacto pero con nombres y magnitud) ---
+  // La heuristica no conoce la intencion; agrupa por tipo de cambio y da nombres + total de lineas,
+  // en vez de volcar una vinieta por archivo con su +N -M (ruidoso).
+  const netStat = arr => { const a = arr.reduce((s, c) => s + c.add, 0), d = arr.reduce((s, c) => s + c.del, 0); return (a || d) ? ` (+${a} -${d})` : ''; };
+  const grp = (label, arr) => {
+    if (!arr.length) return null;
+    const names = arr.slice().sort((a, b) => (b.add + b.del) - (a.add + a.del)).map(c => baseName(c.path));
+    return `- ${label} (${arr.length}): ${briefList(names, 4)}${netStat(arr)}`;
+  };
+  const body = [
+    grp('Nuevos', added),
+    grp('Modificados', modified),
+    grp('Renombrados', renamed),
+    grp('Eliminados', deleted)
+  ].filter(Boolean);
 
-  let message = `${subjectLine}\n\n${body.join('\n')}`;
+  // con un solo archivo, el asunto ya lo dice todo: no repitas en el cuerpo
+  let message = (changes.length <= 1) ? subjectLine : `${subjectLine}\n\n${body.join('\n')}`;
 
-  // --- intento con IA (VSCode Language Model API); si no hay modelo, queda la heuristica ---
+  // --- intento con IA (VSCode Language Model API); si no hay modelo o esta desactivada, queda la heuristica ---
   let usedAi = false, aiModel = '';
-  if (!opCancelled) {
+  const aiEnabled = cfg('aiCommit', true) !== false;
+  if (aiEnabled && !opCancelled) {
     const fileSummary = changes.slice(0, 40).map(c => {
       const k = c.kind === 'add' ? 'nuevo' : c.kind === 'del' ? 'eliminado' : c.kind === 'ren' ? 'renombrado' : 'modificado';
       return `${k}: ${multiRepo ? c.repo + '/' : ''}${c.path} (+${c.add} -${c.del})`;
     }).join('\n');
+    // arma el diff que ve la IA: prioriza codigo sobre config/docs y recorta al presupuesto
+    const diffText = assembleDiff(diffBlocks, DIFF_CAP, multiRepo);
     post({ type: 'log', level: 'dim', text: 'Consultando modelo de IA (si hay)…' });
-    const ai = await aiCommitMessage(fileSummary, diffText, { convStyle, type, scope, recentSubjects });
+    const ai = await aiCommitMessage(fileSummary, diffText, { convStyle, type, scope, recentSubjects, lang });
     if (ai && ai.text) { message = ai.text; usedAi = true; aiModel = ai.model; }
   }
 
-  post({ type: 'log', level: 'ok', text: usedAi
-    ? `Sugerencia con IA (${aiModel}): ${changes.length} archivo(s), +${totalAdd} -${totalDel}`
-    : `Sugerencia lista: ${changes.length} archivo(s), +${totalAdd} -${totalDel}` });
+  lastSuggestion = message; // recuerda lo sugerido para no preguntar si el usuario re-sugiere sin editar
+  post({ type: 'log', level: 'ok', text: `Sugerencia lista: ${changes.length} archivo(s), +${totalAdd} -${totalDel}` });
   post({ type: 'suggest', message });
   post({ type: 'done' });
 }
@@ -987,19 +1035,21 @@ async function aiCommitMessage(fileSummary, diffText, opts) {
     const style = opts.convStyle
       ? `Usa Conventional Commits: "tipo(scope): asunto" con tipos feat, fix, docs, style, refactor, perf, test o chore. Por los cambios, el tipo probable es "${opts.type || 'refactor'}"${opts.scope ? ` y el scope "${opts.scope}"` : ''} (ajustalo si el diff lo contradice).`
       : 'Escribe el asunto en imperativo, sin prefijo de tipo.';
+    const idioma = opts.lang === 'en' ? 'ingles' : 'espanol';
     const examples = (opts.recentSubjects && opts.recentSubjects.length)
-      ? ['', 'ESTILO (asuntos recientes del repo, imita su tono e idioma):', ...opts.recentSubjects.map(s => `- ${s}`)]
-      : ['', '(no hay historial: escribe en espanol)'];
+      ? ['', 'ESTILO (asuntos recientes del repo, imita su tono y formato):', ...opts.recentSubjects.map(s => `- ${s}`)]
+      : [];
     const prompt = [
-      'Eres un asistente que redacta mensajes de commit claros y concisos.',
-      'A partir del resumen de archivos y el diff, redacta UN solo mensaje de commit:',
-      '- Primera linea (asunto) de 72 caracteres o menos, en imperativo, que describa QUE cambia y POR QUE (la intencion), no que archivos toca. Sin punto final.',
-      '- Una linea en blanco.',
-      '- Cuerpo con vinetas "- " (maximo 6) explicando los cambios relevantes y el motivo. Omite lo trivial.',
-      '- Escribe en el MISMO IDIOMA que los asuntos recientes del repo (si no hay, en espanol).',
-      '- Si el diff introduce un cambio incompatible, marcalo con "!" tras el tipo/scope y una linea "BREAKING CHANGE: ...".',
+      'Eres un desarrollador senior redactando el mensaje de commit de tu propio cambio.',
+      'Lee el diff (no solo la lista de archivos) e infiere QUE se hizo y PARA QUE. Redacta UN mensaje:',
+      '- Asunto (1a linea, <=72 caracteres, imperativo, sin punto final): resume la esencia del cambio, el efecto real; nunca nombres de archivos ni "varios cambios".',
+      '- Linea en blanco.',
+      '- Cuerpo: de 2 a 4 vinetas "- ", cada una un cambio concreto agrupado por proposito (no por archivo). Precisas pero breves; di QUE cambio y, si aporta, por que. Nada trivial ni obvio, y que no repitan el asunto.',
+      '- Si hay un solo cambio pequeno, basta el asunto (sin cuerpo).',
+      `- Escribe en ${idioma}, en tono tecnico y directo.`,
+      '- Si el cambio rompe compatibilidad, anade al final una linea "BREAKING CHANGE: <que se rompe>".',
       style,
-      'Responde SOLO con el mensaje de commit, sin comillas, sin explicaciones y sin bloques de codigo.',
+      'Responde SOLO con el mensaje de commit, sin comillas, sin encabezados y sin bloques de codigo.',
       ...examples,
       '',
       'ARCHIVOS:',

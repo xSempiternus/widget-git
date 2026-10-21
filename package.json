@@ -96,6 +96,33 @@
           "minimum": 0,
           "maximum": 1,
           "description": "Intensidad de la imagen de fondo (0 = oculta, 1 = plena). Ajustable tambien desde el icono de imagen del panel. Por defecto muy sutil para no restar legibilidad."
+        },
+        "gitArcade.aiCommit": {
+          "type": "boolean",
+          "default": true,
+          "description": "Usar el modelo de IA del editor (Copilot, Claude, etc.) para redactar el mensaje de commit. Si se desactiva, Brew usa solo su sugerencia heuristica offline."
+        },
+        "gitArcade.commitLanguage": {
+          "type": "string",
+          "enum": ["auto", "es", "en"],
+          "enumDescriptions": [
+            "Detecta el idioma segun los commits recientes del repo",
+            "Siempre en espanol",
+            "Siempre en ingles"
+          ],
+          "default": "auto",
+          "description": "Idioma del mensaje de commit sugerido."
+        },
+        "gitArcade.conventionalCommits": {
+          "type": "string",
+          "enum": ["auto", "always", "never"],
+          "enumDescriptions": [
+            "Usa el formato tipo(scope): asunto solo si el repo ya lo usa",
+            "Siempre usa Conventional Commits",
+            "Nunca usa prefijo de tipo"
+          ],
+          "default": "auto",
+          "description": "Formato Conventional Commits (feat/fix/...): auto lo activa si el historial ya lo usa."
         }
       }
     }

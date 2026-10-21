@@ -132,22 +132,42 @@ test('isNoise detecta lockfiles y generados', () => {
   assert.ok(!L.isNoise('src/index.js'));
 });
 
-test('stripNoiseFromDiff quita solo los bloques ruido', () => {
+test('splitDiffFiles separa por archivo y extrae la ruta', () => {
   const diff = [
     'diff --git a/src/app.js b/src/app.js',
-    '@@ -1 +1 @@',
-    '-a',
-    '+b',
-    'diff --git a/package-lock.json b/package-lock.json',
-    '@@ -1 +1 @@',
-    '-x',
-    '+y',
-    ''
+    '@@ -1 +1 @@', '-a', '+b',
+    'diff --git a/README.md b/README.md',
+    '@@ -1 +1 @@', '-x', '+y', ''
   ].join('\n');
-  const out = L.stripNoiseFromDiff(diff);
-  assert.match(out, /src\/app\.js/);
-  assert.ok(!out.includes('package-lock.json'));
-  assert.strictEqual(L.stripNoiseFromDiff(''), '');
+  const blocks = L.splitDiffFiles(diff);
+  assert.strictEqual(blocks.length, 2);
+  assert.strictEqual(blocks[0].path, 'src/app.js');
+  assert.strictEqual(blocks[1].path, 'README.md');
+  assert.deepStrictEqual(L.splitDiffFiles(''), []);
+});
+
+test('assembleDiff filtra ruido y prioriza codigo sobre docs', () => {
+  const blocks = [
+    { repo: 'r', path: 'README.md', text: 'DOC\n' },
+    { repo: 'r', path: 'package-lock.json', text: 'LOCK\n' },
+    { repo: 'r', path: 'src/app.js', text: 'CODE\n' }
+  ];
+  const out = L.assembleDiff(blocks, 12000, false);
+  assert.ok(!out.includes('LOCK'));                 // ruido descartado
+  assert.ok(out.indexOf('CODE') < out.indexOf('DOC')); // codigo antes que docs
+});
+
+test('assembleDiff antepone repo en multi-repo y respeta el cap', () => {
+  const blocks = [{ repo: 'api', path: 'src/a.js', text: 'AAAA' }];
+  assert.match(L.assembleDiff(blocks, 12000, true), /^# repo: api\n/);
+  const long = [{ repo: 'x', path: 'src/a.js', text: 'a'.repeat(100) }];
+  assert.ok(L.assembleDiff(long, 10, false).length <= 10);
+});
+
+test('detectLang distingue espanol de ingles', () => {
+  assert.strictEqual(L.detectLang(['feat: agrega el panel de café', 'corrige el error']), 'es');
+  assert.strictEqual(L.detectLang(['feat: add panel', 'fix the login error and update']), 'en');
+  assert.strictEqual(L.detectLang([]), 'es');   // sin historial -> espanol por defecto
 });
 
 test('pickChatModel prefiere el modelo mas capaz', () => {
